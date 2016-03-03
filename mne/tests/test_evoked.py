@@ -19,9 +19,8 @@ from mne import (equalize_channels, pick_types, read_evokeds, write_evokeds,
                  grand_average, combine_evoked, create_info)
 from mne.evoked import _get_peak, Evoked, EvokedArray
 from mne.epochs import EpochsArray
-
+from mne.tests.common import assert_naming
 from mne.utils import _TempDir, requires_pandas, slow_test, requires_version
-
 from mne.externals.six.moves import cPickle as pickle
 
 warnings.simplefilter('always')
@@ -122,7 +121,7 @@ def test_io_evoked():
         fname2 = op.join(tempdir, 'test-bad-name.fif')
         write_evokeds(fname2, ave)
         read_evokeds(fname2)
-    assert_true(len(w) == 2)
+    assert_naming(w, 'test_evoked.py', 2)
 
     # constructor
     assert_raises(TypeError, Evoked, fname)
@@ -176,7 +175,7 @@ def test_evoked_resample():
     # upsample, write it out, read it in
     ave = read_evokeds(fname, 0)
     sfreq_normal = ave.info['sfreq']
-    ave.resample(2 * sfreq_normal)
+    ave.resample(2 * sfreq_normal, npad=100)
     write_evokeds(op.join(tempdir, 'evoked-ave.fif'), ave)
     ave_up = read_evokeds(op.join(tempdir, 'evoked-ave.fif'), 0)
 
@@ -185,7 +184,7 @@ def test_evoked_resample():
 
     # and compare the original to the downsampled upsampled version
     ave_new = read_evokeds(op.join(tempdir, 'evoked-ave.fif'), 0)
-    ave_new.resample(sfreq_normal)
+    ave_new.resample(sfreq_normal, npad=100)
 
     assert_array_almost_equal(ave_normal.data, ave_new.data, 2)
     assert_array_almost_equal(ave_normal.times, ave_new.times)

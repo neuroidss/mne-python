@@ -3,11 +3,13 @@ import os
 
 from nose.tools import assert_true, assert_raises
 import numpy as np
-from numpy.testing import assert_array_almost_equal, assert_array_equal
+from numpy.testing import (assert_array_almost_equal, assert_array_equal,
+                           assert_equal)
 import warnings
 
 from mne import (read_events, write_events, make_fixed_length_events,
                  find_events, pick_events, find_stim_steps, io, pick_channels)
+from mne.tests.common import assert_naming
 from mne.utils import _TempDir, run_tests_if_main
 from mne.event import define_target_events, merge_events
 
@@ -126,7 +128,7 @@ def test_io_events():
         fname2 = op.join(tempdir, 'test-bad-name.fif')
         write_events(fname2, events)
         read_events(fname2)
-    assert_true(len(w) == 2)
+    assert_naming(w, 'test_event.py', 2)
 
 
 def test_find_events():
@@ -303,6 +305,10 @@ def test_make_fixed_length_events():
     raw = io.Raw(raw_fname)
     events = make_fixed_length_events(raw, id=1)
     assert_true(events.shape[1], 3)
+    tmin, tmax = raw.times[[0, -1]]
+    duration = tmax - tmin
+    events = make_fixed_length_events(raw, 1, tmin, tmax, duration)
+    assert_equal(events.shape[0], 1)
 
 
 def test_define_events():

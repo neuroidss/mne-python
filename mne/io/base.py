@@ -9,7 +9,6 @@
 
 import copy
 from copy import deepcopy
-import warnings
 import os
 import os.path as op
 
@@ -18,6 +17,7 @@ from scipy import linalg
 
 from .constants import FIFF
 from .pick import pick_types, channel_type, pick_channels, pick_info
+from .pick import _pick_data_channels, _pick_data_or_ica
 from .meas_info import write_meas_info
 from .proj import setup_proj, activate_proj, _proj_equal, ProjMixin
 from ..channels.channels import (ContainsMixin, UpdateChannelsMixin,
@@ -27,7 +27,7 @@ from .compensator import set_current_comp
 from .write import (start_file, end_file, start_block, end_block,
                     write_dau_pack16, write_float, write_double,
                     write_complex64, write_complex128, write_int,
-                    write_id, write_string, _get_split_size)
+                    write_id, write_string, write_name_list, _get_split_size)
 
 from ..filter import (low_pass_filter, high_pass_filter, band_pass_filter,
                       notch_filter, band_stop_filter, resample,
@@ -37,11 +37,12 @@ from ..parallel import parallel_func
 from ..utils import (_check_fname, _check_pandas_installed,
                      _check_pandas_index_arguments,
                      check_fname, _get_stim_channel, object_hash,
-                     logger, verbose, _time_mask)
+                     logger, verbose, _time_mask, warn)
 from ..viz import plot_raw, plot_raw_psd, plot_raw_psd_topo
 from ..defaults import _handle_default
 from ..externals.six import string_types
 from ..event import find_events, concatenate_events
+from ..annotations import _combine_annotations
 
 
 class ToDataFrameMixin(object):
@@ -229,9 +230,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     def __init__(self, info, preload=False,
                  first_samps=(0,), last_samps=None,
                  filenames=(None,), raw_extras=(None,),
-                 comp=None, orig_comp_grade=None,
-                 orig_format='double', dtype=np.float64,
-                 verbose=None):
+                 comp=None, orig_comp_grade=None, orig_format='double',
+                 dtype=np.float64, verbose=None):
         # wait until the end to preload data, but triage here
         if isinstance(preload, np.ndarray):
             # some functions (e.g., filtering) only work w/64-bit data
@@ -242,7 +242,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                 raise ValueError('preload and dtype must match')
             self._data = preload
             self.preload = True
-            last_samps = [self._data.shape[1] - 1]
+            assert len(first_samps) == 1
+            last_samps = [first_samps[0] + self._data.shape[1] - 1]
             load_from_disk = False
         else:
             if last_samps is None:
@@ -274,10 +275,11 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         self._projectors = list()
         self._projector = None
         self._dtype_ = dtype
+        self.annotations = None
         # If we have True or a string, actually do the preloading
+        self._update_times()
         if load_from_disk:
             self._preload_data(preload)
-        self._update_times()
 
     @property
     def _dtype(self):
@@ -322,10 +324,6 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         if start >= stop:
             raise ValueError('No data in this range')
 
-        logger.info('Reading %d ... %d  =  %9.3f ... %9.3f secs...' %
-                    (start, stop - 1, start / float(self.info['sfreq']),
-                     (stop - 1) / float(self.info['sfreq'])))
-
         #  Initialize the data and calibration vector
         n_sel_channels = self.info['nchan'] if sel is None else len(sel)
         # convert sel to a slice if possible for efficiency
@@ -336,7 +334,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         dtype = self._dtype
         if isinstance(data_buffer, np.ndarray):
             if data_buffer.shape != data_shape:
-                raise ValueError('data_buffer has incorrect shape')
+                raise ValueError('data_buffer has incorrect shape: %s != %s'
+                                 % (data_buffer.shape, data_shape))
             data = data_buffer
         elif isinstance(data_buffer, string_types):
             # use a memmap
@@ -384,8 +383,6 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                                     int(start_file), int(stop_file),
                                     cals, mult)
             offset += n_read
-
-        logger.info('[done]')
         return data
 
     def _read_segment_file(self, data, idx, fi, start, stop, cals, mult):
@@ -438,9 +435,13 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             self._preload_data(True)
         return self
 
-    def _preload_data(self, preload):
+    @verbose
+    def _preload_data(self, preload, verbose=None):
         """This function actually preloads the data"""
-        data_buffer = preload if isinstance(preload, string_types) else None
+        data_buffer = preload if isinstance(preload, (string_types,
+                                                      np.ndarray)) else None
+        logger.info('Reading %d ... %d  =  %9.3f ... %9.3f secs...' %
+                    (0, len(self.times) - 1, 0., self.times[-1]))
         self._data = self._read_segment(data_buffer=data_buffer)
         assert len(self._data) == self.info['nchan']
         self.preload = True
@@ -504,6 +505,10 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         if isinstance(item[0], slice):
             start = item[0].start if item[0].start is not None else 0
             nchan = self.info['nchan']
+            if start < 0:
+                start += nchan
+                if start < 0:
+                    raise ValueError('start must be >= -%s' % nchan)
             stop = item[0].stop if item[0].stop is not None else nchan
             step = item[0].step if item[0].step is not None else 1
             sel = list(range(start, stop, step))
@@ -617,7 +622,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             raise RuntimeError('Raw data needs to be preloaded. Use '
                                'preload=True (or string) in the constructor.')
         if picks is None:
-            picks = pick_types(self.info, meg=True, eeg=True, exclude=[])
+            picks = _pick_data_channels(self.info, exclude=[],
+                                        with_ref_meg=False)
 
         if not callable(fun):
             raise ValueError('fun needs to be a function')
@@ -796,11 +802,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             raise RuntimeError('Raw data needs to be preloaded to filter. Use '
                                'preload=True (or string) in the constructor.')
         if picks is None:
-            if 'ICA ' in ','.join(self.ch_names):
-                pick_parameters = dict(misc=True, ref_meg=False)
-            else:
-                pick_parameters = dict(meg=True, eeg=True, ref_meg=False)
-            picks = pick_types(self.info, exclude=[], **pick_parameters)
+            picks = _pick_data_or_ica(self.info)
             # let's be safe.
             if len(picks) < 1:
                 raise RuntimeError('Could not find any valid channels for '
@@ -924,11 +926,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             verbose = self.verbose
         fs = float(self.info['sfreq'])
         if picks is None:
-            if 'ICA ' in ','.join(self.ch_names):
-                pick_parameters = dict(misc=True)
-            else:
-                pick_parameters = dict(meg=True, eeg=True)
-            picks = pick_types(self.info, exclude=[], **pick_parameters)
+            picks = _pick_data_or_ica(self.info)
             # let's be safe.
             if len(picks) < 1:
                 raise RuntimeError('Could not find any valid channels for '
@@ -947,7 +945,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                                   picks=picks, n_jobs=n_jobs, copy=False)
 
     @verbose
-    def resample(self, sfreq, npad=100, window='boxcar', stim_picks=None,
+    def resample(self, sfreq, npad=None, window='boxcar', stim_picks=None,
                  n_jobs=1, events=None, copy=False, verbose=None):
         """Resample data channels.
 
@@ -975,8 +973,10 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         ----------
         sfreq : float
             New sample rate to use.
-        npad : int
+        npad : int | str
             Amount to pad the start and end of the data.
+            Can also be "auto" to use a padding that will result in
+            a power-of-two size (can be much faster).
         window : string or tuple
             Window to use in resampling. See scipy.signal.resample.
         stim_picks : array of int | None
@@ -1008,6 +1008,11 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         For some data, it may be more accurate to use npad=0 to reduce
         artifacts. This is dataset dependent -- check your data!
         """
+        if npad is None:
+            npad = 100
+            warn('npad is currently taken to be 100, but will be changed to '
+                 '"auto" in 0.12. Please set the value explicitly.',
+                 DeprecationWarning)
         if not self.preload:
             raise RuntimeError('Can only resample preloaded data')
 
@@ -1068,12 +1073,10 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                 # Did we loose events?
                 resampled_events = find_events(inst)
                 if len(resampled_events) != len(original_events):
-                    warnings.warn(
-                        'Resampling of the stim channels caused event '
-                        'information to become unreliable. Consider finding '
-                        'events on the original data and passing the event '
-                        'matrix as a parameter.'
-                    )
+                    warn('Resampling of the stim channels caused event '
+                         'information to become unreliable. Consider finding '
+                         'events on the original data and passing the event '
+                         'matrix as a parameter.')
             except:
                 pass
 
@@ -1124,7 +1127,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             raise ValueError('tmax must be less than or equal to the max raw '
                              'time (%0.4f sec)' % max_time)
 
-        smin, smax = np.where(_time_mask(self.times, tmin, tmax))[0][[0, -1]]
+        smin, smax = np.where(_time_mask(self.times, tmin, tmax,
+                                         sfreq=self.info['sfreq']))[0][[0, -1]]
         cumul_lens = np.concatenate(([0], np.array(raw._raw_lengths,
                                                    dtype='int')))
         cumul_lens = np.cumsum(cumul_lens)
@@ -1222,8 +1226,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
 
         if self.preload:
             if np.iscomplexobj(self._data):
-                warnings.warn('Saving raw file with complex data. Loading '
-                              'with command-line MNE tools will not work.')
+                warn('Saving raw file with complex data. Loading with '
+                     'command-line MNE tools will not work.')
 
         type_dict = dict(short=FIFF.FIFFT_DAU_PACK16,
                          int=FIFF.FIFFT_INT,
@@ -1594,8 +1598,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             stop = min(self.n_times - 1, self.time_as_index(tstop)[0])
         tslice = slice(start, stop + 1)
         if picks is None:
-            picks = pick_types(self.info, meg=True, eeg=True, ref_meg=False,
-                               exclude='bads')
+            picks = _pick_data_channels(self.info, exclude='bads',
+                                        with_ref_meg=False)
         # ensure we don't get a view of data
         if len(picks) == 1:
             return 1.0, 1.0
@@ -1658,9 +1662,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                                      'in:\n%s' % (bad_file,
                                                   self._filenames[0]))
                 else:
-                    warnings.warn('%d bad channels from:\n%s\nnot found '
-                                  'in:\n%s' % (count_diff, bad_file,
-                                               self._filenames[0]))
+                    warn('%d bad channels from:\n%s\nnot found in:\n%s'
+                         % (count_diff, bad_file, self._filenames[0]))
             self.info['bads'] = names_there
         else:
             self.info['bads'] = []
@@ -1682,7 +1685,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             None, preload=True or False is inferred using the preload status
             of the raw files passed in.
         """
-        from .fiff.raw import RawFIF
+        from .fiff.raw import Raw
         from .kit.kit import RawKIT
         from .edf.edf import RawEDF
 
@@ -1702,7 +1705,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             else:
                 preload = False
 
-        if not preload and not isinstance(self, (RawFIF, RawKIT, RawEDF)):
+        if not preload and not isinstance(self, (Raw, RawKIT, RawEDF)):
             raise RuntimeError('preload must be True to concatenate '
                                'files unless they are FIF, KIT, or EDF')
         if preload is False:
@@ -1745,6 +1748,12 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             self._last_samps = np.r_[self._last_samps, r._last_samps]
             self._raw_extras += r._raw_extras
             self._filenames += r._filenames
+            self.annotations = _combine_annotations((self.annotations,
+                                                     r.annotations),
+                                                    self._last_samps,
+                                                    self._first_samps,
+                                                    self.info['sfreq'])
+
         self._update_times()
 
         if not (len(self._first_samps) == len(self._last_samps) ==
@@ -1767,10 +1776,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     def __repr__(self):
         name = self._filenames[0]
         name = 'None' if name is None else op.basename(name)
-        s = ', '.join(('%r' % name, "n_channels x n_times : %s x %s"
-                       % (len(self.ch_names), self.n_times)))
-        s = "n_channels x n_times : %s x %s" % (len(self.info['ch_names']),
-                                                self.n_times)
+        s = ('%s, n_channels x n_times : %s x %s (%0.1f sec)'
+             % (name, len(self.ch_names), self.n_times, self.times[-1]))
         return "<%s  |  %s>" % (self.__class__.__name__, s)
 
     def add_events(self, events, stim_channel=None):
@@ -1819,121 +1826,6 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             else:
                 buffer_size_sec = 10.0
         return int(np.ceil(buffer_size_sec * self.info['sfreq']))
-
-
-def _mult_cal_one(data_view, one, idx, cals, mult):
-    """Take a chunk of raw data, multiply by mult or cals, and store"""
-    one = np.asarray(one, dtype=data_view.dtype)
-    assert data_view.shape[1] == one.shape[1]
-    if mult is not None:
-        data_view[:] = np.dot(mult, one)
-    else:
-        if isinstance(idx, slice):
-            data_view[:] = one[idx]
-        else:
-            # faster than doing one = one[idx]
-            np.take(one, idx, axis=0, out=data_view)
-        if cals is not None:
-            data_view *= cals
-
-
-def _blk_read_lims(start, stop, buf_len):
-    """Helper to deal with indexing in the middle of a data block
-
-    Parameters
-    ----------
-    start : int
-        Starting index.
-    stop : int
-        Ending index (exclusive).
-    buf_len : int
-        Buffer size in samples.
-
-    Returns
-    -------
-    block_start_idx : int
-        The first block to start reading from.
-    r_lims : list
-        The read limits.
-    d_lims : list
-        The write limits.
-
-    Notes
-    -----
-    Consider this example::
-
-        >>> start, stop, buf_len = 2, 27, 10
-
-                    +---------+---------+---------
-    File structure: |  buf0   |   buf1  |   buf2  |
-                    +---------+---------+---------
-    File time:      0        10        20        30
-                    +---------+---------+---------
-    Requested time:   2                       27
-
-                    |                             |
-                blockstart                    blockstop
-                      |                        |
-                    start                    stop
-
-    We need 27 - 2 = 25 samples (per channel) to store our data, and
-    we need to read from 3 buffers (30 samples) to get all of our data.
-
-    On all reads but the first, the data we read starts at
-    the first sample of the buffer. On all reads but the last,
-    the data we read ends on the last sample of the buffer.
-
-    We call ``this_data`` the variable that stores the current buffer's data,
-    and ``data`` the variable that stores the total output.
-
-    On the first read, we need to do this::
-
-        >>> data[0:buf_len-2] = this_data[2:buf_len]  # doctest: +SKIP
-
-    On the second read, we need to do::
-
-        >>> data[1*buf_len-2:2*buf_len-2] = this_data[0:buf_len]  # doctest: +SKIP
-
-    On the final read, we need to do::
-
-        >>> data[2*buf_len-2:3*buf_len-2-3] = this_data[0:buf_len-3]  # doctest: +SKIP
-
-    This function encapsulates this logic to allow a loop over blocks, where
-    data is stored using the following limits::
-
-        >>> data[d_lims[ii, 0]:d_lims[ii, 1]] = this_data[r_lims[ii, 0]:r_lims[ii, 1]]  # doctest: +SKIP
-
-    """  # noqa
-    # this is used to deal with indexing in the middle of a sampling period
-    assert all(isinstance(x, int) for x in (start, stop, buf_len))
-    block_start_idx = (start // buf_len)
-    block_start = block_start_idx * buf_len
-    last_used_samp = stop - 1
-    block_stop = last_used_samp - last_used_samp % buf_len + buf_len
-    read_size = block_stop - block_start
-    n_blk = read_size // buf_len + (read_size % buf_len != 0)
-    start_offset = start - block_start
-    end_offset = block_stop - stop
-    d_lims = np.empty((n_blk, 2), int)
-    r_lims = np.empty((n_blk, 2), int)
-    for bi in range(n_blk):
-        # Triage start (sidx) and end (eidx) indices for
-        # data (d) and read (r)
-        if bi == 0:
-            d_sidx = 0
-            r_sidx = start_offset
-        else:
-            d_sidx = bi * buf_len - start_offset
-            r_sidx = 0
-        if bi == n_blk - 1:
-            d_eidx = stop - start
-            r_eidx = buf_len - end_offset
-        else:
-            d_eidx = (bi + 1) * buf_len - start_offset
-            r_eidx = buf_len
-        d_lims[bi] = [d_sidx, d_eidx]
-        r_lims[bi] = [r_sidx, r_eidx]
-    return block_start_idx, r_lims, d_lims
 
 
 def _allocate_data(data, data_buffer, data_shape, dtype):
@@ -2033,10 +1925,8 @@ def _write_raw(fname, raw, info, picks, fmt, data_type, reset_range, start,
 
     if part_idx > 0:
         # insert index in filename
-        path, base = op.split(fname)
-        idx = base.find('.')
-        use_fname = op.join(path, '%s-%d.%s' % (base[:idx], part_idx,
-                                                base[idx + 1:]))
+        base, ext = op.splitext(fname)
+        use_fname = '%s-%d%s' % (base, part_idx, ext)
     else:
         use_fname = fname
     logger.info('Writing %s' % use_fname)
@@ -2091,7 +1981,7 @@ def _write_raw(fname, raw, info, picks, fmt, data_type, reset_range, start,
                              'size: decrease "buffer_size_sec" or increase'
                              '"split_size".')
         if pos > split_size:
-            raise logger.warning('file is larger than "split_size"')
+            warn('file is larger than "split_size"')
 
         # Split files if necessary, leave some space for next file info
         if pos >= split_size - this_buff_size_bytes - 2 ** 20:
@@ -2111,6 +2001,18 @@ def _write_raw(fname, raw, info, picks, fmt, data_type, reset_range, start,
             break
 
         pos_prev = pos
+
+    if raw.annotations is not None:
+        start_block(fid, FIFF.FIFFB_MNE_ANNOTATIONS)
+        write_float(fid, FIFF.FIFF_MNE_BASELINE_MIN, raw.annotations.onset)
+        write_float(fid, FIFF.FIFF_MNE_BASELINE_MAX,
+                    raw.annotations.duration + raw.annotations.onset)
+        # To allow : in description, they need to be replaced for serialization
+        write_name_list(fid, FIFF.FIFF_COMMENT, [d.replace(':', ';') for d in
+                                                 raw.annotations.description])
+        if raw.annotations.orig_time is not None:
+            write_double(fid, FIFF.FIFF_MEAS_DATE, raw.annotations.orig_time)
+        end_block(fid, FIFF.FIFFB_MNE_ANNOTATIONS)
 
     logger.info('Closing %s [done]' % use_fname)
     if info.get('maxshield', False):
@@ -2287,9 +2189,8 @@ def _check_raw_compatibility(raw):
                    zip(raw[0].info['projs'], raw[ri].info['projs'])):
             raise ValueError('SSP projectors in raw files must be the same')
     if not all(r.orig_format == raw[0].orig_format for r in raw):
-        warnings.warn('raw files do not all have the same data format, '
-                      'could result in precision mismatch. Setting '
-                      'raw.orig_format="unknown"')
+        warn('raw files do not all have the same data format, could result in '
+             'precision mismatch. Setting raw.orig_format="unknown"')
         raw[0].orig_format = 'unknown'
 
 
@@ -2329,17 +2230,17 @@ def concatenate_raws(raws, preload=None, events_list=None):
         return raws[0], events
 
 
-def _check_update_montage(info, montage):
+def _check_update_montage(info, montage, path=None, update_ch_names=False):
     """ Helper function for eeg readers to add montage"""
     if montage is not None:
-        if not isinstance(montage, (str, Montage)):
+        if not isinstance(montage, (string_types, Montage)):
             err = ("Montage must be str, None, or instance of Montage. "
                    "%s was provided" % type(montage))
             raise TypeError(err)
         if montage is not None:
-            if isinstance(montage, str):
-                montage = read_montage(montage)
-            _set_montage(info, montage)
+            if isinstance(montage, string_types):
+                montage = read_montage(montage, path=path)
+            _set_montage(info, montage, update_ch_names=update_ch_names)
 
             missing_positions = []
             exclude = (FIFF.FIFFV_EOG_CH, FIFF.FIFFV_MISC_CH,

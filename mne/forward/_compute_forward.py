@@ -37,10 +37,10 @@ def _dup_coil_set(coils, coord_frame, t):
     if t is not None:
         coord_frame = t['to']
         for coil in coils:
+            for key in ('ex', 'ey', 'ez'):
+                if key in coil:
+                    coil[key] = apply_trans(t['trans'], coil[key], False)
             coil['r0'] = apply_trans(t['trans'], coil['r0'])
-            coil['ex'] = apply_trans(t['trans'], coil['ex'], False)
-            coil['ey'] = apply_trans(t['trans'], coil['ey'], False)
-            coil['ez'] = apply_trans(t['trans'], coil['ez'], False)
             coil['rmag'] = apply_trans(t['trans'], coil['rmag'])
             coil['cosmag'] = apply_trans(t['trans'], coil['cosmag'], False)
             coil['coord_frame'] = t['to']
@@ -200,15 +200,17 @@ def _bem_specify_coils(bem, coils, coord_frame, mults, n_jobs):
     # Process each of the surfaces
     rmags, cosmags, ws, bins = _concatenate_coils(coils)
     lens = np.cumsum(np.r_[0, [len(s['rr']) for s in bem['surfs']]])
-    coeff = np.empty((bins[-1] + 1, lens[-1]))  # shape(n_coils, n_BEM_verts)
+    sol = np.zeros((bins[-1] + 1, bem['solution'].shape[1]))
 
+    lims = np.concatenate([np.arange(0, sol.shape[0], 100), [sol.shape[0]]])
     # Compute coeffs for each surface, one at a time
     for o1, o2, surf, mult in zip(lens[:-1], lens[1:],
                                   bem['surfs'], bem['field_mult']):
-        coeff[:, o1:o2] = _lin_field_coeff(surf, mult, rmags, cosmags, ws,
-                                           bins, n_jobs)
-    # put through the bem
-    sol = np.dot(coeff, bem['solution'])
+        coeff = _lin_field_coeff(surf, mult, rmags, cosmags, ws, bins, n_jobs)
+        # put through the bem (in chunks to save memory)
+        for start, stop in zip(lims[:-1], lims[1:]):
+            sol[start:stop] += np.dot(coeff[start:stop],
+                                      bem['solution'][o1:o2])
     sol *= mults
     return sol
 

@@ -21,7 +21,7 @@ from mne.utils import run_tests_if_main
 
 from mne.viz import (plot_topo_image_epochs, _get_presser,
                      mne_analyze_colormap, plot_evoked_topo)
-from mne.viz.topo import _plot_update_evoked_topo
+from mne.viz.topo import _plot_update_evoked_topo_proj
 
 # Set our plotters to test mode
 import matplotlib
@@ -77,6 +77,11 @@ def test_plot_topo():
     # Show topography
     evoked = _get_epochs().average()
     plot_evoked_topo(evoked)  # should auto-find layout
+    # Test jointplot
+    evoked.plot_joint()
+    evoked.plot_joint(title='test', ts_args=dict(spatial_colors=True),
+                      topomap_args=dict(colorbar=True, times=[0.]))
+
     warnings.simplefilter('always', UserWarning)
     picked_evoked = evoked.pick_channels(evoked.ch_names[:3], copy=True)
     picked_evoked_eeg = evoked.pick_types(meg=False, eeg=True, copy=True)
@@ -98,16 +103,19 @@ def test_plot_topo():
         fig = plot_evoked_topo(picked_evoked_delayed_ssp, layout,
                                proj='interactive')
         func = _get_presser(fig)
-        event = namedtuple('Event', 'inaxes')
-        func(event(inaxes=fig.axes[0]))
+        event = namedtuple('Event', ['inaxes', 'xdata', 'ydata'])
+        func(event(inaxes=fig.axes[0], xdata=fig.axes[0]._mne_axs[0].pos[0],
+                   ydata=fig.axes[0]._mne_axs[0].pos[1]))
+        func(event(inaxes=fig.axes[0], xdata=0, ydata=0))
         params = dict(evokeds=[picked_evoked_delayed_ssp],
                       times=picked_evoked_delayed_ssp.times,
                       fig=fig, projs=picked_evoked_delayed_ssp.info['projs'])
         bools = [True] * len(params['projs'])
-        _plot_update_evoked_topo(params, bools)
+        _plot_update_evoked_topo_proj(params, bools)
     # should auto-generate layout
     plot_evoked_topo(picked_evoked_eeg.copy(),
                      fig_background=np.zeros((4, 3, 3)), proj=True)
+    picked_evoked.plot_topo(merge_grads=True)  # Test RMS plot of grad pairs
     plt.close('all')
 
 

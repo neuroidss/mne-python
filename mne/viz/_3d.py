@@ -11,16 +11,15 @@ from __future__ import print_function
 #
 # License: Simplified BSD
 
-from ..externals.six import string_types, advance_iterator
-
+import base64
+from itertools import cycle
 import os.path as op
 import warnings
-from itertools import cycle
-import base64
 
 import numpy as np
 from scipy import linalg
 
+from ..externals.six import string_types, advance_iterator
 from ..io.pick import pick_types
 from ..io.constants import FIFF
 from ..surface import (get_head_surf, get_meg_helmet_surf, read_surface,
@@ -28,7 +27,7 @@ from ..surface import (get_head_surf, get_meg_helmet_surf, read_surface,
 from ..transforms import (read_trans, _find_trans, apply_trans,
                           combine_transforms, _get_trans, _ensure_trans,
                           invert_transform)
-from ..utils import get_subjects_dir, logger, _check_subject, verbose
+from ..utils import get_subjects_dir, logger, _check_subject, verbose, warn
 from ..fixes import _get_args
 from ..defaults import _handle_default
 from .utils import mne_analyze_colormap, _prepare_trellis, COLORS, plt_show
@@ -358,8 +357,8 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
             # no locations are provided
             if (ch_type is not None or
                     len(pick_types(info, meg=False, eeg=True)) > 0):
-                warnings.warn('EEG electrode locations not found. '
-                              'Cannot plot EEG electrodes.')
+                warn('EEG electrode locations not found. Cannot plot EEG '
+                     'electrodes.')
     if meg_sensors:
         meg_loc = np.array([info['chs'][k]['loc'][:3]
                            for k in pick_types(info)])
@@ -372,8 +371,7 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
                                        'meg', 'mri')
                 meg_loc = apply_trans(t, meg_loc)
         else:
-            warnings.warn('MEG electrodes not found. '
-                          'Cannot plot MEG locations.')
+            warn('MEG electrodes not found. Cannot plot MEG locations.')
     if dig:
         ext_loc = np.array([d['r'] for d in info['dig']
                            if d['kind'] == FIFF.FIFFV_POINT_EXTRA])
@@ -387,8 +385,7 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
             ext_loc = apply_trans(head_mri_t, ext_loc)
             car_loc = apply_trans(head_mri_t, car_loc)
         if len(car_loc) == len(ext_loc) == 0:
-            warnings.warn('Digitization points not found. '
-                          'Cannot plot digitization.')
+            warn('Digitization points not found. Cannot plot digitization.')
 
     # do the plotting, surfaces then points
     from mayavi import mlab
@@ -481,7 +478,7 @@ def _limits_to_control_points(clim, stc_data, colormap):
     if len(set(ctrl_pts)) != 3:
         if len(set(ctrl_pts)) == 1:  # three points match
             if ctrl_pts[0] == 0:  # all are zero
-                warnings.warn('All data were zero')
+                warn('All data were zero')
                 ctrl_pts = np.arange(3, dtype=float)
             else:
                 ctrl_pts *= [0., 0.5, 1]  # all nonzero pts == max
@@ -829,8 +826,8 @@ def plot_sparse_source_estimates(src, stcs, colors=None, linewidth=2,
 
 def plot_dipole_locations(dipoles, trans, subject, subjects_dir=None,
                           bgcolor=(1, 1, 1), opacity=0.3,
-                          brain_color=(0.7, 0.7, 0.7), mesh_color=(1, 1, 0),
-                          fig_name=None, fig_size=(600, 600), mode='cone',
+                          brain_color=(1, 1, 0), fig_name=None,
+                          fig_size=(600, 600), mode='cone',
                           scale_factor=0.1e-1, colors=None, verbose=None):
     """Plot dipole locations
 
@@ -855,8 +852,6 @@ def plot_dipole_locations(dipoles, trans, subject, subjects_dir=None,
         Opacity of brain mesh.
     brain_color : tuple of length 3
         Brain color.
-    mesh_color : tuple of length 3
-        Mesh color.
     fig_name : str
         Mayavi figure name.
     fig_size : tuple of length 2
@@ -904,7 +899,7 @@ def plot_dipole_locations(dipoles, trans, subject, subjects_dir=None,
     fig = mlab.figure(size=fig_size, bgcolor=bgcolor, fgcolor=(0, 0, 0))
     with warnings.catch_warnings(record=True):  # FutureWarning in traits
         mlab.triangular_mesh(points[:, 0], points[:, 1], points[:, 2],
-                             faces, color=mesh_color, opacity=opacity)
+                             faces, color=brain_color, opacity=opacity)
 
     for dip, color in zip(dipoles, colors):
         rgb_color = color_converter.to_rgb(color)

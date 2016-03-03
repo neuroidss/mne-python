@@ -28,7 +28,7 @@ def channel_type(info, idx):
     -------
     type : 'grad' | 'mag' | 'eeg' | 'stim' | 'eog' | 'emg' | 'ecg'
            'ref_meg' | 'resp' | 'exci' | 'ias' | 'syst' | 'misc'
-           'seeg' | 'chpi'
+           'seeg' | 'chpi' | 'dipole' | 'gof'
         Type of channel
     """
     kind = info['chs'][idx]['kind']
@@ -59,13 +59,17 @@ def channel_type(info, idx):
         return 'ias'
     elif kind == FIFF.FIFFV_SYST_CH:
         return 'syst'
-    elif kind in [FIFF.FIFFV_SEEG_CH, 702]:  # 702 was used before v0.11
+    elif kind == FIFF.FIFFV_SEEG_CH:
         return 'seeg'
     elif kind in [FIFF.FIFFV_QUAT_0, FIFF.FIFFV_QUAT_1, FIFF.FIFFV_QUAT_2,
                   FIFF.FIFFV_QUAT_3, FIFF.FIFFV_QUAT_4, FIFF.FIFFV_QUAT_5,
                   FIFF.FIFFV_QUAT_6, FIFF.FIFFV_HPI_G, FIFF.FIFFV_HPI_ERR,
                   FIFF.FIFFV_HPI_MOV]:
         return 'chpi'  # channels relative to head position monitoring
+    elif kind == FIFF.FIFFV_DIPOLE_WAVE:
+        return 'dipole'
+    elif kind == FIFF.FIFFV_GOODNESS_FIT:
+        return 'gof'
     raise Exception('Unknown channel type')
 
 
@@ -97,6 +101,11 @@ def pick_channels(ch_names, include, exclude=[]):
         raise RuntimeError('ch_names is not a unique list, picking is unsafe')
     _check_excludes_includes(include)
     _check_excludes_includes(exclude)
+    if not isinstance(include, set):
+        include = set(include)
+    if not isinstance(exclude, set):
+        exclude = set(exclude)
+
     sel = []
     for k, name in enumerate(ch_names):
         if (len(include) == 0 or name in include) and name not in exclude:
@@ -166,8 +175,8 @@ def _check_meg_type(meg, allow_auto=False):
 
 def pick_types(info, meg=True, eeg=False, stim=False, eog=False, ecg=False,
                emg=False, ref_meg='auto', misc=False, resp=False, chpi=False,
-               exci=False, ias=False, syst=False, seeg=False,
-               include=[], exclude='bads', selection=None):
+               exci=False, ias=False, syst=False, seeg=False, dipole=False,
+               gof=False, include=[], exclude='bads', selection=None):
     """Pick channels by type and names
 
     Parameters
@@ -207,7 +216,11 @@ def pick_types(info, meg=True, eeg=False, stim=False, eog=False, ecg=False,
     syst : bool
         System status channel information (on Triux systems only).
     seeg : bool
-        Stereotactic EEG channels
+        Stereotactic EEG channels.
+    dipole : bool
+        Dipole time course channels.
+    gof : bool
+        Dipole goodness of fit channels.
     include : list of string
         List of additional channels to include. If empty do not include any.
     exclude : list of string | str
@@ -248,6 +261,7 @@ def pick_types(info, meg=True, eeg=False, stim=False, eog=False, ecg=False,
 
     for k in range(nchan):
         kind = info['chs'][k]['kind']
+        # XXX eventually we should de-duplicate this with channel_type!
         if kind == FIFF.FIFFV_MEG_CH:
             pick[k] = _triage_meg_pick(info['chs'][k], meg)
         elif kind == FIFF.FIFFV_EEG_CH and eeg:
@@ -268,8 +282,7 @@ def pick_types(info, meg=True, eeg=False, stim=False, eog=False, ecg=False,
             pick[k] = True
         elif kind == FIFF.FIFFV_SYST_CH and syst:
             pick[k] = True
-        elif kind in [FIFF.FIFFV_SEEG_CH, 702] and seeg:
-            # Constant 702 was used before v0.11
+        elif kind == FIFF.FIFFV_SEEG_CH and seeg:
             pick[k] = True
         elif kind == FIFF.FIFFV_IAS_CH and ias:
             pick[k] = True
@@ -279,6 +292,10 @@ def pick_types(info, meg=True, eeg=False, stim=False, eog=False, ecg=False,
                       FIFF.FIFFV_QUAT_3, FIFF.FIFFV_QUAT_4, FIFF.FIFFV_QUAT_5,
                       FIFF.FIFFV_QUAT_6, FIFF.FIFFV_HPI_G, FIFF.FIFFV_HPI_ERR,
                       FIFF.FIFFV_HPI_MOV] and chpi:
+            pick[k] = True
+        elif kind == FIFF.FIFFV_DIPOLE_WAVE and dipole:
+            pick[k] = True
+        elif kind == FIFF.FIFFV_GOODNESS_FIT and gof:
             pick[k] = True
 
     # restrict channels to selection if provided
@@ -328,8 +345,6 @@ def pick_info(info, sel=[], copy=True):
         raise ValueError('No channels match the selection.')
 
     info['chs'] = [info['chs'][k] for k in sel]
-    info['ch_names'] = [info['ch_names'][k] for k in sel]
-    info['nchan'] = len(sel)
     info['bads'] = [ch for ch in info['bads'] if ch in info['ch_names']]
 
     comps = deepcopy(info['comps'])
@@ -463,9 +478,7 @@ def pick_channels_forward(orig, include=[], exclude=[], verbose=None):
     fwd['sol']['row_names'] = ch_names
 
     # Pick the appropriate channel names from the info-dict using sel_info
-    fwd['info']['ch_names'] = [fwd['info']['ch_names'][k] for k in sel_info]
     fwd['info']['chs'] = [fwd['info']['chs'][k] for k in sel_info]
-    fwd['info']['nchan'] = nuse
     fwd['info']['bads'] = [b for b in fwd['info']['bads'] if b in ch_names]
 
     if fwd['sol_grad'] is not None:
@@ -513,6 +526,7 @@ def pick_types_forward(orig, meg=True, eeg=False, ref_meg=True, seeg=False,
     if len(sel) == 0:
         raise ValueError('No valid channels found')
     include_ch_names = [info['ch_names'][k] for k in sel]
+
     return pick_channels_forward(orig, include_ch_names)
 
 
@@ -621,8 +635,8 @@ def _check_excludes_includes(chs, info=None, allow_bads=False):
         Channels to be excluded/excluded. If allow_bads, and chs=="bads",
         this will be the bad channels found in 'info'.
     """
-    from .meas_info import Info
-    if not isinstance(chs, (list, tuple, np.ndarray)):
+    from .meas_info import Info, _ChannelNameList
+    if not isinstance(chs, (list, tuple, np.ndarray, _ChannelNameList)):
         if allow_bads is True:
             if not isinstance(info, Info):
                 raise ValueError('Supply an info object if allow_bads is true')
@@ -637,10 +651,21 @@ def _check_excludes_includes(chs, info=None, allow_bads=False):
     return chs
 
 
-def _pick_data_channels(info, exclude='bads'):
+def _pick_data_channels(info, exclude='bads', with_ref_meg=True):
     """Convenience function for picking only data channels."""
     return pick_types(info, meg=True, eeg=True, stim=False, eog=False,
-                      ecg=False, emg=False, ref_meg=True, misc=False,
+                      ecg=False, emg=False, ref_meg=with_ref_meg, misc=False,
                       resp=False, chpi=False, exci=False, ias=False,
                       syst=False, seeg=True, include=[], exclude=exclude,
                       selection=None)
+
+
+def _pick_data_or_ica(info):
+    """Convenience function for picking only data or ICA channels."""
+    ch_names = [c['ch_name'] for c in info['chs']]
+    if 'ICA ' in ','.join(ch_names):
+        picks = pick_types(info, exclude=[], misc=True)
+    else:
+        picks = _pick_data_channels(info, exclude=[],
+                                    with_ref_meg=False)
+    return picks

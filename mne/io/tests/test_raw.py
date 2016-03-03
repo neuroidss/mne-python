@@ -37,7 +37,8 @@ def _test_raw_reader(reader, test_preloading=True, **kwargs):
         raw = reader(preload=True, **kwargs)
         # don't assume the first is preloaded
         buffer_fname = op.join(tempdir, 'buffer')
-        picks = rng.permutation(np.arange(len(raw.ch_names)))[:10]
+        picks = rng.permutation(np.arange(len(raw.ch_names) - 1))[:10]
+        picks = np.append(picks, len(raw.ch_names) - 1)  # test trigger channel
         bnd = min(int(round(raw.info['buffer_size_sec'] *
                             raw.info['sfreq'])), raw.n_times)
         slices = [slice(0, bnd), slice(bnd - 1, bnd), slice(3, bnd),
@@ -65,7 +66,8 @@ def _test_raw_reader(reader, test_preloading=True, **kwargs):
     raw.save(out_fname, tmax=raw.times[-1], overwrite=True, buffer_size_sec=1)
     raw3 = Raw(out_fname)
     assert_equal(set(raw.info.keys()), set(raw3.info.keys()))
-    assert_array_almost_equal(raw3[0:20][0], full_data[0:20])
+    assert_allclose(raw3[0:20][0], full_data[0:20], rtol=1e-6,
+                    atol=1e-20)  # atol is very small but > 0
     assert_array_almost_equal(raw.times, raw3.times)
 
     assert_true(not math.isnan(raw3.info['highpass']))
@@ -101,11 +103,12 @@ def _test_concat(reader, *args):
         data = raw[:, :][0]
         for preloads in ((True, True), (True, False), (False, False)):
             for last_preload in (True, False):
-                print(first_preload, preloads, last_preload)
-                raw1 = raw.crop(0, 0.4999)
+                t_crops = raw.times[np.argmin(np.abs(raw.times - 0.5)) +
+                                    [0, 1]]
+                raw1 = raw.crop(0, t_crops[0])
                 if preloads[0]:
                     raw1.load_data()
-                raw2 = raw.crop(0.5, None)
+                raw2 = raw.crop(t_crops[1], None)
                 if preloads[1]:
                     raw2.load_data()
                 raw1.append(raw2)

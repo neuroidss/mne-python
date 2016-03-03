@@ -11,7 +11,7 @@
 import numpy as np
 from os.path import splitext
 
-from .utils import check_fname, logger, verbose, _get_stim_channel
+from .utils import check_fname, logger, verbose, _get_stim_channel, warn
 from .io.constants import FIFF
 from .io.tree import dir_tree_find
 from .io.tag import read_tag
@@ -398,8 +398,7 @@ def find_stim_steps(raw, pad_start=None, pad_stop=None, merge=0,
         raise ValueError('No stim channel found to extract event triggers.')
     data, _ = raw[picks, :]
     if np.any(data < 0):
-        logger.warning('Trigger channel contains negative values. '
-                       'Taking absolute value.')
+        warn('Trigger channel contains negative values, using absolute value.')
         data = np.abs(data)  # make sure trig channel is positive
     data = data.astype(np.int)
 
@@ -419,8 +418,7 @@ def _find_events(data, first_samp, verbose=None, output='onset',
         merge = 0
 
     if np.any(data < 0):
-        logger.warning('Trigger channel contains negative values. '
-                       'Taking absolute value.')
+        warn('Trigger channel contains negative values, using absolute value.')
         data = np.abs(data)  # make sure trig channel is positive
     data = data.astype(np.int)
 
@@ -518,7 +516,7 @@ def find_events(raw, stim_channel=None, verbose=None, output='onset',
         All events that were found. The first column contains the event time
         in samples and the third column contains the event id. For output =
         'onset' or 'step', the second column contains the value of the stim
-        channel immediately before the the event/step. For output = 'offset',
+        channel immediately before the event/step. For output = 'offset',
         the second column contains the value of the stim channel after the
         event offset.
 
@@ -722,7 +720,8 @@ def make_fixed_length_events(raw, id, start=0, stop=None, duration=1.):
         raise ValueError('id must be an integer')
     # Make sure we don't go out the end of the file:
     stop -= int(np.ceil(raw.info['sfreq'] * duration))
-    ts = np.arange(start, stop, raw.info['sfreq'] * duration).astype(int)
+    # This should be inclusive due to how we generally use start and stop...
+    ts = np.arange(start, stop + 1, raw.info['sfreq'] * duration).astype(int)
     n_events = len(ts)
     events = np.c_[ts, np.zeros(n_events, dtype=int),
                    id * np.ones(n_events, dtype=int)]

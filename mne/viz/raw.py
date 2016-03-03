@@ -13,10 +13,10 @@ from functools import partial
 import numpy as np
 
 from ..externals.six import string_types
-from ..io.pick import pick_types, _pick_data_channels
+from ..io.pick import pick_types, _pick_data_channels, pick_info
 from ..io.proj import setup_proj
 from ..utils import verbose, get_config
-from ..time_frequency import compute_raw_psd
+from ..time_frequency import psd_welch
 from .topo import _plot_topo, _plot_timeseries
 from .utils import (_toggle_options, _toggle_proj, tight_layout,
                     _layout_figure, _plot_raw_onkey, figure_nobar,
@@ -235,7 +235,7 @@ def plot_raw(raw, events=None, duration=10.0, start=0.0, n_channels=20,
         inds += [pick_types(info, meg=t, ref_meg=False, exclude=[])]
         types += [t] * len(inds[-1])
     pick_kwargs = dict(meg=False, ref_meg=False, exclude=[])
-    for t in ['eeg', 'eog', 'ecg', 'emg', 'ref_meg', 'stim', 'resp',
+    for t in ['eeg', 'seeg', 'eog', 'ecg', 'emg', 'ref_meg', 'stim', 'resp',
               'misc', 'chpi', 'syst', 'ias', 'exci']:
         pick_kwargs[t] = True
         inds += [pick_types(raw.info, **pick_kwargs)]
@@ -288,10 +288,50 @@ def plot_raw(raw, events=None, duration=10.0, start=0.0, n_channels=20,
     # plot event_line first so it's in the back
     event_lines = [params['ax'].plot([np.nan], color=event_color[ev_num])[0]
                    for ev_num in sorted(event_color.keys())]
+
     params['plot_fun'] = partial(_plot_raw_traces, params=params, inds=inds,
                                  color=color, bad_color=bad_color,
                                  event_lines=event_lines,
                                  event_color=event_color)
+
+    if raw.annotations is not None:
+        segments = list()
+        segment_colors = dict()
+        meas_date = info['meas_date']
+        # sort the segments by start time
+        order = raw.annotations.onset.argsort(axis=0)
+        descriptions = raw.annotations.description[order]
+        color_keys = set(descriptions)
+        color_vals = np.linspace(0, 1, len(color_keys))
+        for idx, key in enumerate(color_keys):
+            if key.lower().startswith('bad'):
+                segment_colors[key] = 'red'
+            else:
+                segment_colors[key] = plt.cm.summer(color_vals[idx])
+        params['segment_colors'] = segment_colors
+        if not np.isscalar(meas_date):
+            meas_date = meas_date[0]
+        for idx, onset in enumerate(raw.annotations.onset[order]):
+            if raw.annotations.orig_time is None:
+                if np.isscalar(info['meas_date']):
+                    orig_time = raw.info['meas_date']
+                else:
+                    orig_time = (raw.info['meas_date'][0] +
+                                 raw.info['meas_date'][1] / 1000000.)
+            else:
+                orig_time = raw.annotations.orig_time
+            annot_start = (orig_time - meas_date + onset -
+                           raw.first_samp / info['sfreq'])
+            annot_end = annot_start + raw.annotations.duration[order][idx]
+            segments.append([annot_start, annot_end])
+            ylim = params['ax_hscroll'].get_ylim()
+            dscr = descriptions[idx]
+            params['ax_hscroll'].fill_betweenx(ylim, annot_start, annot_end,
+                                               alpha=0.3,
+                                               color=segment_colors[dscr])
+        params['segments'] = np.array(segments)
+        params['annot_description'] = descriptions
+
     params['update_fun'] = partial(_update_raw_data, params=params)
     params['pick_bads_fun'] = partial(_pick_bad_channels, params=params)
     params['label_click_fun'] = partial(_label_clicked, params=params)
@@ -468,10 +508,10 @@ def plot_raw_psd(raw, tmin=0., tmax=np.inf, fmin=0, fmax=np.inf, proj=False,
 
     for ii, (picks, title, ax) in enumerate(zip(picks_list, titles_list,
                                                 ax_list)):
-        psds, freqs = compute_raw_psd(raw, tmin=tmin, tmax=tmax, picks=picks,
-                                      fmin=fmin, fmax=fmax, proj=proj,
-                                      n_fft=n_fft, n_overlap=n_overlap,
-                                      n_jobs=n_jobs, verbose=verbose)
+        psds, freqs = psd_welch(raw, tmin=tmin, tmax=tmax, picks=picks,
+                                fmin=fmin, fmax=fmax, proj=proj,
+                                n_fft=n_fft, n_overlap=n_overlap,
+                                n_jobs=n_jobs)
 
         # Convert PSDs to dB
         if dB:
@@ -570,18 +610,19 @@ def _prepare_mne_browse_raw(params, title, bgcolor, color, bad_color, inds,
                 False)
 
     params['offsets'] = offsets
-    params['lines'] = [ax.plot([np.nan], antialiased=False, linewidth=0.5)[0]
+    params['lines'] = [ax.plot([np.nan], antialiased=False, linewidth=0.5,
+                               zorder=1)[0]
                        for _ in range(n_ch)]
     ax.set_yticklabels(['X' * max([len(ch) for ch in info['ch_names']])])
     vertline_color = (0., 0.75, 0.)
     params['ax_vertline'] = ax.plot([0, 0], ylim, color=vertline_color,
-                                    zorder=-1)[0]
+                                    zorder=0)[0]
     params['ax_vertline'].ch_name = ''
     params['vertline_t'] = ax_hscroll.text(0, 1, '', color=vertline_color,
                                            va='bottom', ha='right')
     params['ax_hscroll_vertline'] = ax_hscroll.plot([0, 0], [0, 1],
                                                     color=vertline_color,
-                                                    zorder=1)[0]
+                                                    zorder=2)[0]
 
 
 def _plot_raw_traces(params, inds, color, bad_color, event_lines=None,
@@ -609,7 +650,7 @@ def _plot_raw_traces(params, inds, color, bad_color, event_lines=None,
             # do NOT operate in-place lest this get screwed up
             this_data = params['data'][inds[ch_ind]] * params['scale_factor']
             this_color = bad_color if ch_name in info['bads'] else color
-            this_z = -1 if ch_name in info['bads'] else 0
+            this_z = 0 if ch_name in info['bads'] else 1
             if isinstance(this_color, dict):
                 this_color = this_color[params['types'][inds[ch_ind]]]
 
@@ -657,6 +698,25 @@ def _plot_raw_traces(params, inds, color, bad_color, event_lines=None,
             else:
                 line.set_xdata([])
                 line.set_ydata([])
+
+    if 'segments' in params:
+        while len(params['ax'].collections) > 0:
+            params['ax'].collections.pop(0)
+        segments = params['segments']
+        times = params['times']
+        ylim = params['ax'].get_ylim()
+        for idx, segment in enumerate(segments):
+            if segment[0] > times[-1]:
+                break  # Since the segments are sorted by t_start
+            if segment[1] < times[0]:
+                continue
+            start = segment[0]
+            end = segment[1]
+            dscr = params['annot_description'][idx]
+            segment_color = params['segment_colors'][dscr]
+            params['ax'].fill_betweenx(ylim, start, end, color=segment_color,
+                                       alpha=0.3)
+
     # finalize plot
     params['ax'].set_xlim(params['times'][0],
                           params['times'][0] + params['duration'], False)
@@ -673,7 +733,7 @@ def _plot_raw_traces(params, inds, color, bad_color, event_lines=None,
 def plot_raw_psd_topo(raw, tmin=0., tmax=None, fmin=0, fmax=100, proj=False,
                       n_fft=2048, n_overlap=0, layout=None, color='w',
                       fig_facecolor='k', axis_facecolor='k', dB=True,
-                      show=True, n_jobs=1, verbose=None):
+                      show=True, block=False, n_jobs=1, verbose=None):
     """Function for plotting channel wise frequency spectra as topography.
 
     Parameters
@@ -711,6 +771,9 @@ def plot_raw_psd_topo(raw, tmin=0., tmax=None, fmin=0, fmax=100, proj=False,
         If True, transform data to decibels. Defaults to True.
     show : bool
         Show figure if True. Defaults to True.
+    block : bool
+        Whether to halt program execution until the figure is closed.
+        May not work on all systems / platforms. Defaults to False.
     n_jobs : int
         Number of jobs to run in parallel. Defaults to 1.
     verbose : bool, str, int, or None
@@ -725,21 +788,25 @@ def plot_raw_psd_topo(raw, tmin=0., tmax=None, fmin=0, fmax=100, proj=False,
         from ..channels.layout import find_layout
         layout = find_layout(raw.info)
 
-    psds, freqs = compute_raw_psd(raw, tmin=tmin, tmax=tmax, fmin=fmin,
-                                  fmax=fmax, proj=proj, n_fft=n_fft,
-                                  n_overlap=n_overlap, n_jobs=n_jobs,
-                                  verbose=verbose)
+    psds, freqs = psd_welch(raw, tmin=tmin, tmax=tmax, fmin=fmin,
+                            fmax=fmax, proj=proj, n_fft=n_fft,
+                            n_overlap=n_overlap, n_jobs=n_jobs)
     if dB:
         psds = 10 * np.log10(psds)
         y_label = 'dB'
     else:
         y_label = 'Power'
     plot_fun = partial(_plot_timeseries, data=[psds], color=color, times=freqs)
+    picks = _pick_data_channels(raw.info)
+    info = pick_info(raw.info, picks)
 
-    fig = _plot_topo(raw.info, times=freqs, show_func=plot_fun, layout=layout,
+    fig = _plot_topo(info, times=freqs, show_func=plot_fun, layout=layout,
                      axis_facecolor=axis_facecolor,
                      fig_facecolor=fig_facecolor, x_label='Frequency (Hz)',
                      y_label=y_label)
 
-    plt_show(show)
+    try:
+        plt_show(show, block=block)
+    except TypeError:  # not all versions have this
+        plt_show(show)
     return fig

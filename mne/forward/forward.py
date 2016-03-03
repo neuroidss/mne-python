@@ -4,9 +4,7 @@
 #
 # License: BSD (3-clause)
 
-from ..externals.six import string_types
 from time import time
-import warnings
 from copy import deepcopy
 import re
 
@@ -18,6 +16,7 @@ import os
 from os import path as op
 import tempfile
 
+from ..externals.six import string_types
 from ..fixes import sparse_block_diag
 from ..io import RawArray, Info
 from ..io.constants import FIFF
@@ -41,8 +40,9 @@ from ..source_space import (_read_source_spaces_from_tree,
 from ..source_estimate import VolSourceEstimate
 from ..transforms import (transform_surface_to, invert_transform,
                           write_trans)
-from ..utils import (_check_fname, get_subjects_dir, has_mne_c,
+from ..utils import (_check_fname, get_subjects_dir, has_mne_c, warn,
                      run_subprocess, check_fname, logger, verbose)
+from ..label import Label
 
 
 class Forward(dict):
@@ -317,9 +317,6 @@ def _read_forward_meas_info(tree, fid):
             tag = read_tag(fid, pos)
             chs.append(tag.data)
     info['chs'] = chs
-
-    info['ch_names'] = [c['ch_name'] for c in chs]
-    info['nchan'] = len(chs)
 
     #   Get the MRI <-> head coordinate transformation
     tag = find_tag(fid, parent_mri, FIFF.FIFF_COORD_TRANS)
@@ -932,8 +929,8 @@ def compute_orient_prior(forward, loose=0.2, verbose=None):
                              'not %s.' % loose)
 
         if is_fixed_ori:
-            warnings.warn('Ignoring loose parameter with forward operator '
-                          'with fixed orientation.')
+            warn('Ignoring loose parameter with forward operator '
+                 'with fixed orientation.')
 
     orient_prior = np.ones(n_sources, dtype=np.float)
     if (not is_fixed_ori) and (loose is not None) and (loose < 1):
@@ -966,7 +963,7 @@ def _restrict_gain_matrix(G, info):
                 G = G[sel]
                 logger.info('    %d EEG channels' % len(sel))
             else:
-                logger.warning('Could not find MEG or EEG channels')
+                warn('Could not find MEG or EEG channels')
     return G
 
 
@@ -1081,16 +1078,16 @@ def _apply_forward(fwd, stc, start=None, stop=None, verbose=None):
                          'supported.')
 
     if np.all(stc.data > 0):
-        warnings.warn('Source estimate only contains currents with positive '
-                      'values. Use pick_ori="normal" when computing the '
-                      'inverse to compute currents not current magnitudes.')
+        warn('Source estimate only contains currents with positive values. '
+             'Use pick_ori="normal" when computing the inverse to compute '
+             'currents not current magnitudes.')
 
     max_cur = np.max(np.abs(stc.data))
     if max_cur > 1e-7:  # 100 nAm threshold for warning
-        warnings.warn('The maximum current magnitude is %0.1f nAm, which is '
-                      'very large. Are you trying to apply the forward model '
-                      'to dSPM values? The result will only be correct if '
-                      'currents are used.' % (1e9 * max_cur))
+        warn('The maximum current magnitude is %0.1f nAm, which is very large.'
+             ' Are you trying to apply the forward model to dSPM values? The '
+             'result will only be correct if currents are used.'
+             % (1e9 * max_cur))
 
     src_sel = _stc_src_sel(fwd['src'], stc)
     if isinstance(stc, VolSourceEstimate):
@@ -1301,9 +1298,20 @@ def restrict_forward_to_label(fwd, labels):
     --------
     restrict_forward_to_stc
     """
+    message = 'labels must be instance of Label or a list of Label.'
+    vertices = [np.array([], int), np.array([], int)]
 
     if not isinstance(labels, list):
         labels = [labels]
+
+    # Get vertices separately of each hemisphere from all label
+    for label in labels:
+        if not isinstance(label, Label):
+            raise TypeError(message + ' Instead received %s' % type(label))
+        i = 0 if label.hemi == 'lh' else 1
+        vertices[i] = np.append(vertices[i], label.vertices)
+    # Remove duplicates and sort
+    vertices = [np.unique(vert_hemi) for vert_hemi in vertices]
 
     fwd_out = deepcopy(fwd)
     fwd_out['source_rr'] = np.zeros((0, 3))
@@ -1311,6 +1319,7 @@ def restrict_forward_to_label(fwd, labels):
     fwd_out['source_nn'] = np.zeros((0, 3))
     fwd_out['sol']['data'] = np.zeros((fwd['sol']['data'].shape[0], 0))
     fwd_out['sol']['ncol'] = 0
+    nuse_lh = fwd['src'][0]['nuse']
 
     for i in range(2):
         fwd_out['src'][i]['vertno'] = np.array([], int)
@@ -1320,25 +1329,21 @@ def restrict_forward_to_label(fwd, labels):
         fwd_out['src'][i]['use_tris'] = np.array([], int)
         fwd_out['src'][i]['nuse_tri'] = np.array([0])
 
-    for label in labels:
-        if label.hemi == 'lh':
-            i = 0
-            src_sel = np.intersect1d(fwd['src'][0]['vertno'], label.vertices)
-            src_sel = np.searchsorted(fwd['src'][0]['vertno'], src_sel)
-        else:
-            i = 1
-            src_sel = np.intersect1d(fwd['src'][1]['vertno'], label.vertices)
-            src_sel = (np.searchsorted(fwd['src'][1]['vertno'], src_sel) +
-                       len(fwd['src'][0]['vertno']))
+        # src_sel is idx to cols in fwd that are in any label per hemi
+        src_sel = np.intersect1d(fwd['src'][i]['vertno'], vertices[i])
+        src_sel = np.searchsorted(fwd['src'][i]['vertno'], src_sel)
 
+        # Reconstruct each src
+        vertno = fwd['src'][i]['vertno'][src_sel]
+        fwd_out['src'][i]['inuse'][vertno] = 1
+        fwd_out['src'][i]['nuse'] += len(vertno)
+        fwd_out['src'][i]['vertno'] = np.where(fwd_out['src'][i]['inuse'])[0]
+
+        # Reconstruct part of fwd that is not sol data
+        src_sel += i * nuse_lh  # Add column shift to right hemi
         fwd_out['source_rr'] = np.vstack([fwd_out['source_rr'],
                                           fwd['source_rr'][src_sel]])
         fwd_out['nsource'] += len(src_sel)
-
-        fwd_out['src'][i]['vertno'] = np.r_[fwd_out['src'][i]['vertno'],
-                                            src_sel]
-        fwd_out['src'][i]['nuse'] += len(src_sel)
-        fwd_out['src'][i]['inuse'][src_sel] = 1
 
         if is_fixed_orient(fwd):
             idx = src_sel

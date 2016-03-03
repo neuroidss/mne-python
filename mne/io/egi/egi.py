@@ -5,14 +5,14 @@
 
 import datetime
 import time
-import warnings
 
 import numpy as np
 
-from ..base import _BaseRaw, _check_update_montage, _mult_cal_one
+from ..base import _BaseRaw, _check_update_montage
+from ..utils import _read_segments_file
 from ..meas_info import _empty_info
 from ..constants import FIFF
-from ...utils import verbose, logger
+from ...utils import verbose, logger, warn
 
 
 def _read_header(fid):
@@ -104,7 +104,7 @@ def _combine_triggers(data, remapping=None):
 
 @verbose
 def read_raw_egi(input_fname, montage=None, eog=None, misc=None,
-                 include=None, exclude=None, preload=None, verbose=None):
+                 include=None, exclude=None, preload=False, verbose=None):
     """Read EGI simple binary as raw object
 
     .. note:: The trigger channel names are based on the
@@ -176,12 +176,7 @@ class RawEGI(_BaseRaw):
     """
     @verbose
     def __init__(self, input_fname, montage=None, eog=None, misc=None,
-                 include=None, exclude=None, preload=None, verbose=None):
-        if preload is None:
-            warnings.warn('preload is True by default but will be changed to '
-                          'False in v0.12. Please explicitly set preload.',
-                          DeprecationWarning)
-            preload = True
+                 include=None, exclude=None, preload=False, verbose=None):
         if eog is None:
             eog = []
         if misc is None:
@@ -210,8 +205,8 @@ class RawEGI(_BaseRaw):
                         if event.sum() <= 1 and event_codes[ii]:
                             more_excludes.append(ii)
                 if len(exclude_inds) + len(more_excludes) == len(event_codes):
-                    warnings.warn('Did not find any event code with more '
-                                  'than one event.', RuntimeWarning)
+                    warn('Did not find any event code with more than one '
+                         'event.', RuntimeWarning)
                 else:
                     exclude_inds.extend(more_excludes)
 
@@ -259,8 +254,7 @@ class RawEGI(_BaseRaw):
         ch_names.extend(list(egi_info['event_codes']))
         if self._new_trigger is not None:
             ch_names.append('STI 014')  # our new_trigger
-        info['nchan'] = nchan = len(ch_names)
-        info['ch_names'] = ch_names
+        nchan = len(ch_names)
         for ii, ch_name in enumerate(ch_names):
             ch_info = {
                 'cal': cal, 'logno': ii + 1, 'scanno': ii + 1, 'range': 1.0,
@@ -289,18 +283,9 @@ class RawEGI(_BaseRaw):
     def _read_segment_file(self, data, idx, fi, start, stop, cals, mult):
         """Read a segment of data from a file"""
         egi_info = self._raw_extras[fi]
+        dtype = egi_info['dtype']
         n_chan_read = egi_info['n_channels'] + egi_info['n_events']
-        data_start = (36 + egi_info['n_events'] * 4 +
-                      start * n_chan_read * egi_info['dtype'].itemsize)
-        n_chan_out = n_chan_read + (1 if self._new_trigger is not None else 0)
-        one = np.empty((n_chan_out, stop - start))
-        with open(self._filenames[fi], 'rb') as fid:
-            fid.seek(data_start, 0)  # skip header
-            final_shape = (stop - start, n_chan_read)
-            one_ = np.fromfile(fid, egi_info['dtype'], np.prod(final_shape))
-            one_.shape = final_shape
-            one[:n_chan_read] = one_.T
-        # reads events as well
-        if self._new_trigger is not None:
-            one[-1] = self._new_trigger[start:stop]
-        _mult_cal_one(data, one, idx, cals, mult)
+        offset = 36 + egi_info['n_events'] * 4
+        _read_segments_file(self, data, idx, fi, start, stop, cals, mult,
+                            dtype=dtype, n_channels=n_chan_read, offset=offset,
+                            trigger_ch=self._new_trigger)

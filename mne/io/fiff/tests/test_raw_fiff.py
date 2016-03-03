@@ -26,11 +26,15 @@ from mne.utils import (_TempDir, requires_pandas, slow_test,
 from mne.externals.six.moves import zip, cPickle as pickle
 from mne.io.proc_history import _get_sss_rank
 from mne.io.pick import _picks_by_type
+from mne.annotations import Annotations
+from mne.tests.common import assert_naming
 
 warnings.simplefilter('always')  # enable b/c these tests throw warnings
 
-data_dir = op.join(testing.data_path(download=False), 'MEG', 'sample')
+testing_path = testing.data_path(download=False)
+data_dir = op.join(testing_path, 'MEG', 'sample')
 fif_fname = op.join(data_dir, 'sample_audvis_trunc_raw.fif')
+ms_fname = op.join(testing_path, 'SSS', 'test_move_anon_raw.fif')
 
 base_dir = op.join(op.dirname(__file__), '..', '..', 'tests', 'data')
 test_fif_fname = op.join(base_dir, 'test_raw.fif')
@@ -99,6 +103,17 @@ def test_hash_raw():
 
     raw_2._data[0, 0] -= 1
     assert_not_equal(hash(raw), hash(raw_2))
+
+
+@testing.requires_testing_data
+def test_maxshield():
+    """Test maxshield warning
+    """
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        Raw(ms_fname, allow_maxshield=True)
+    assert_equal(len(w), 1)
+    assert_true('test_raw_fiff.py' in w[0].filename)
 
 
 @testing.requires_testing_data
@@ -413,6 +428,7 @@ def test_io_raw():
     for chars in [b'\xc3\xa4\xc3\xb6\xc3\xa9', b'a']:
         with Raw(fif_fname) as r:
             assert_true('Raw' in repr(r))
+            assert_true(op.basename(fif_fname) in repr(r))
             desc1 = r.info['description'] = chars.decode('utf-8')
             temp_file = op.join(tempdir, 'raw.fif')
             r.save(temp_file, overwrite=True)
@@ -515,7 +531,7 @@ def test_io_raw():
         raw_badname = op.join(tempdir, 'test-bad-name.fif.gz')
         raw.save(raw_badname)
         Raw(raw_badname)
-    assert_true(len(w) > 0)  # len(w) should be 2 but Travis sometimes has more
+    assert_naming(w, 'test_raw_fiff.py', 2)
 
 
 @testing.requires_testing_data
@@ -575,6 +591,10 @@ def test_getitem():
         data1, times1 = raw[[0, 1]]
         assert_array_equal(data, data1)
         assert_array_equal(times, times1)
+        assert_array_equal(raw[-10:, :][0],
+                           raw[len(raw.ch_names) - 10:, :][0])
+        assert_raises(ValueError, raw.__getitem__,
+                      (slice(-len(raw.ch_names) - 1), slice(None)))
 
 
 @testing.requires_testing_data
@@ -751,6 +771,33 @@ def test_filter():
     assert_array_almost_equal(data, data_notch, sig_dec_notch_fit)
 
 
+def test_filter_picks():
+    """Test filtering default channel picks"""
+    ch_types = ['mag', 'grad', 'eeg', 'seeg', 'misc', 'stim']
+    info = create_info(ch_names=ch_types, ch_types=ch_types, sfreq=256)
+    raw = RawArray(data=np.zeros((len(ch_types), 1000)), info=info)
+
+    # -- Deal with meg mag grad exception
+    ch_types = ('misc', 'stim', 'meg', 'eeg', 'seeg')
+
+    # -- Filter data channels
+    for ch_type in ('mag', 'grad', 'eeg', 'seeg'):
+        picks = dict((ch, ch == ch_type) for ch in ch_types)
+        picks['meg'] = ch_type if ch_type in ('mag', 'grad') else False
+        raw_ = raw.pick_types(copy=True, **picks)
+        # Avoid RuntimeWarning due to Attenuation
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter('always')
+            raw_.filter(10, 30)
+            assert_true(len(w) == 1)
+
+    # -- Error if no data channel
+    for ch_type in ('misc', 'stim'):
+        picks = dict((ch, ch == ch_type) for ch in ch_types)
+        raw_ = raw.pick_types(copy=True, **picks)
+        assert_raises(RuntimeError, raw_.filter, 10, 30)
+
+
 @testing.requires_testing_data
 def test_crop():
     """Test cropping raw files
@@ -794,6 +841,14 @@ def test_crop():
         assert_equal(raw.last_samp, ar.last_samp)
         assert_array_equal(raw[:, :][0], ar[:, :][0])
 
+    # test shape consistency of cropped raw
+    data = np.zeros((1, 1002001))
+    info = create_info(1, 1000)
+    raw = RawArray(data, info)
+    for tmin in range(0, 1001, 100):
+        raw1 = raw.crop(tmin=tmin, tmax=tmin + 2, copy=True)
+        assert_equal(raw1[:][0].shape, (1, 2001))
+
 
 @testing.requires_testing_data
 def test_resample():
@@ -805,7 +860,7 @@ def test_resample():
     raw_resamp = raw.copy()
     sfreq = raw.info['sfreq']
     # test parallel on upsample
-    raw_resamp.resample(sfreq * 2, n_jobs=2)
+    raw_resamp.resample(sfreq * 2, n_jobs=2, npad='auto')
     assert_equal(raw_resamp.n_times, len(raw_resamp.times))
     raw_resamp.save(op.join(tempdir, 'raw_resamp-raw.fif'))
     raw_resamp = Raw(op.join(tempdir, 'raw_resamp-raw.fif'), preload=True)
@@ -814,7 +869,7 @@ def test_resample():
     assert_equal(raw_resamp._data.shape[1], raw_resamp.n_times)
     assert_equal(raw._data.shape[0], raw_resamp._data.shape[0])
     # test non-parallel on downsample
-    raw_resamp.resample(sfreq, n_jobs=1)
+    raw_resamp.resample(sfreq, n_jobs=1, npad='auto')
     assert_equal(raw_resamp.info['sfreq'], sfreq)
     assert_equal(raw._data.shape, raw_resamp._data.shape)
     assert_equal(raw.first_samp, raw_resamp.first_samp)
@@ -837,9 +892,9 @@ def test_resample():
     raw3 = raw.copy()
     raw4 = raw.copy()
     raw1 = concatenate_raws([raw1, raw2])
-    raw1.resample(10.)
-    raw3.resample(10.)
-    raw4.resample(10.)
+    raw1.resample(10., npad='auto')
+    raw3.resample(10., npad='auto')
+    raw4.resample(10., npad='auto')
     raw3 = concatenate_raws([raw3, raw4])
     assert_array_equal(raw1._data, raw3._data)
     assert_array_equal(raw1._first_samps, raw3._first_samps)
@@ -854,12 +909,12 @@ def test_resample():
     # basic decimation
     stim = [1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0]
     raw = RawArray([stim], create_info(1, len(stim), ['stim']))
-    assert_allclose(raw.resample(8.)._data,
+    assert_allclose(raw.resample(8., npad='auto')._data,
                     [[1, 1, 0, 0, 1, 1, 0, 0]])
 
     # decimation of multiple stim channels
     raw = RawArray(2 * [stim], create_info(2, len(stim), 2 * ['stim']))
-    assert_allclose(raw.resample(8.)._data,
+    assert_allclose(raw.resample(8., npad='auto')._data,
                     [[1, 1, 0, 0, 1, 1, 0, 0],
                      [1, 1, 0, 0, 1, 1, 0, 0]])
 
@@ -867,7 +922,7 @@ def test_resample():
     # done naively
     stim = [0, 0, 0, 1, 1, 0, 0, 0]
     raw = RawArray([stim], create_info(1, len(stim), ['stim']))
-    assert_allclose(raw.resample(4.)._data,
+    assert_allclose(raw.resample(4., npad='auto')._data,
                     [[0, 1, 1, 0]])
 
     # two events are merged in this case (warning)
@@ -875,7 +930,7 @@ def test_resample():
     raw = RawArray([stim], create_info(1, len(stim), ['stim']))
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter('always')
-        raw.resample(8.)
+        raw.resample(8., npad='auto')
         assert_true(len(w) == 1)
 
     # events are dropped in this case (warning)
@@ -883,28 +938,28 @@ def test_resample():
     raw = RawArray([stim], create_info(1, len(stim), ['stim']))
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter('always')
-        raw.resample(4.)
+        raw.resample(4., npad='auto')
         assert_true(len(w) == 1)
 
     # test resampling events: this should no longer give a warning
     stim = [0, 1, 1, 0, 0, 1, 1, 0]
     raw = RawArray([stim], create_info(1, len(stim), ['stim']))
     events = find_events(raw)
-    raw, events = raw.resample(4., events=events)
+    raw, events = raw.resample(4., events=events, npad='auto')
     assert_equal(events, np.array([[0, 0, 1], [2, 0, 1]]))
 
     # test copy flag
     stim = [1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0]
     raw = RawArray([stim], create_info(1, len(stim), ['stim']))
-    raw_resampled = raw.resample(4., copy=True)
+    raw_resampled = raw.resample(4., npad='auto', copy=True)
     assert_true(raw_resampled is not raw)
-    raw_resampled = raw.resample(4., copy=False)
+    raw_resampled = raw.resample(4., npad='auto', copy=False)
     assert_true(raw_resampled is raw)
 
     # resample should still work even when no stim channel is present
     raw = RawArray(np.random.randn(1, 100), create_info(1, 100, ['eeg']))
-    raw.resample(10)
-    assert_true(len(raw) == 10)
+    raw.resample(10, npad='auto')
+    assert_equal(len(raw), 10)
 
 
 @testing.requires_testing_data
@@ -1006,8 +1061,10 @@ def test_add_channels():
     raw_meg = raw.pick_types(meg=True, eeg=False, copy=True)
     raw_stim = raw.pick_types(meg=False, eeg=False, stim=True, copy=True)
     raw_new = raw_meg.add_channels([raw_eeg, raw_stim], copy=True)
-    assert_true(all(ch in raw_new.ch_names
-                    for ch in raw_stim.ch_names + raw_meg.ch_names))
+    assert_true(
+        all(ch in raw_new.ch_names
+            for ch in list(raw_stim.ch_names) + list(raw_meg.ch_names))
+    )
     raw_new = raw_meg.add_channels([raw_eeg], copy=True)
 
     assert_true(ch in raw_new.ch_names for ch in raw.ch_names)
@@ -1046,11 +1103,17 @@ def test_save():
     # can't overwrite file without overwrite=True
     assert_raises(IOError, raw.save, fif_fname)
 
-    # test abspath support
+    # test abspath support and annotations
+    annot = Annotations([10], [10], ['test'], raw.info['meas_date'])
+    raw.annotations = annot
     new_fname = op.join(op.abspath(op.curdir), 'break-raw.fif')
     raw.save(op.join(tempdir, new_fname), overwrite=True)
     new_raw = Raw(op.join(tempdir, new_fname), preload=False)
     assert_raises(ValueError, new_raw.save, new_fname)
+    assert_array_equal(annot.onset, new_raw.annotations.onset)
+    assert_array_equal(annot.duration, new_raw.annotations.duration)
+    assert_array_equal(annot.description, new_raw.annotations.description)
+    assert_equal(annot.orig_time, new_raw.annotations.orig_time)
     # make sure we can overwrite the file we loaded when preload=True
     new_raw = Raw(op.join(tempdir, new_fname), preload=True)
     new_raw.save(op.join(tempdir, new_fname), overwrite=True)

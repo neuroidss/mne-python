@@ -16,13 +16,10 @@ import sys
 import os
 import os.path as op
 from datetime import date
+import sphinx_gallery as sg
 
-try:
-    import sphinx_gallery as sg
-    sg_extension = 'sphinx_gallery.gen_gallery'
-except ImportError:
-    import sphinxgallery as sg
-    sg_extension = 'sphinxgallery.gen_gallery'
+sg_extension = 'sphinx_gallery.gen_gallery'
+
 import sphinx_bootstrap_theme
 
 # If extensions (or modules to document with autodoc) are in another directory,
@@ -44,7 +41,7 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx.ext.pngmath',
               'sphinx.ext.mathjax',
               'numpy_ext.numpydoc',
-            #   'sphinx.ext.intersphinx',
+              'sphinx.ext.intersphinx',
               # 'flow_diagram',
               sg_extension]
 
@@ -97,7 +94,7 @@ release = version
 # today_fmt = '%B %d, %Y'
 
 # List of documents that shouldn't be included in the build.
-unused_docs = ['config_doc.rst']
+unused_docs = []
 
 # List of directories, relative to source directory, that shouldn't be searched
 # for source files.
@@ -142,13 +139,14 @@ html_theme_options = {
     'bootswatch_theme': "flatly",
     'navbar_sidebarrel': False,
     'bootstrap_version': "3",
-    'navbar_links': [("Tutorials", "tutorials"),
-                     ("Gallery", "auto_examples/index"),
-                     ("Manual", "manual/index"),
-                     ("API", "python_reference"),
-                     ("FAQ", "faq"),
-                     ("Cite", "cite"),
-                     ],
+    'navbar_links': [
+        ("Get started", "getting_started"),
+        ("Tutorials", "tutorials"),
+        ("Gallery", "auto_examples/index"),
+        ("API", "python_reference"),
+        ("Manual", "manual/index"),
+        ("FAQ", "faq"),
+    ],
     }
 
 # Add any paths that contain custom themes here, relative to this directory.
@@ -168,7 +166,7 @@ html_logo = "_static/mne_logo_small.png"
 # The name of an image file (within the static path) to use as favicon of the
 # docs.  This file should be a Windows icon file (.ico) being 16x16 or 32x32
 # pixels large.
-html_favicon = "favicon.ico"
+html_favicon = "_static/favicon.ico"
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -272,16 +270,18 @@ trim_doctests_flags = True
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {'http://docs.python.org/': None}
 
-sphinxgallery_conf = {
+sphinx_gallery_conf = {
+    'filename_pattern': '/plot_',
     'examples_dirs'   : ['../examples', '../tutorials'],
     'gallery_dirs'    : ['auto_examples', 'auto_tutorials'],
-    'doc_module': ('sphinxgallery', 'numpy'),
+    'doc_module': ('mne',),
+    'mod_example_dir' : 'generated',
     'reference_url': {
         'mne': None,
         'matplotlib': 'http://matplotlib.org',
-        'numpy': 'http://docs.scipy.org/doc/numpy-1.9.1',
-        'scipy': 'http://docs.scipy.org/doc/scipy-0.11.0/reference',
+        'numpy': 'http://docs.scipy.org/doc/numpy-1.10.1',
+        'scipy': 'http://docs.scipy.org/doc/scipy-0.17.0/reference',
         'mayavi': 'http://docs.enthought.com/mayavi/mayavi'},
     'find_mayavi_figures': True,
-    'default_thumb_file': '_static/mne_helmet.png',
+    'default_thumb_file': os.path.join('_static', 'mne_helmet.png'),
     }

@@ -7,9 +7,9 @@ Morlet code inspired by Matlab code from Sheraz Khan & Brainstorm & SPM
 #
 # License : BSD (3-clause)
 
-import warnings
-from math import sqrt
 from copy import deepcopy
+from math import sqrt
+
 import numpy as np
 from scipy import linalg
 from scipy.fftpack import fftn, ifftn
@@ -17,7 +17,7 @@ from scipy.fftpack import fftn, ifftn
 from ..fixes import partial
 from ..baseline import rescale
 from ..parallel import parallel_func
-from ..utils import logger, verbose, _time_mask
+from ..utils import logger, verbose, _time_mask, warn
 from ..channels.channels import ContainsMixin, UpdateChannelsMixin
 from ..io.pick import pick_info, pick_types
 from ..io.meas_info import Info
@@ -500,18 +500,16 @@ def _induced_power_cwt(data, sfreq, frequencies, use_fft=True, n_cycles=7,
 
 
 def _preproc_tfr(data, times, freqs, tmin, tmax, fmin, fmax, mode,
-                 baseline, vmin, vmax, dB):
+                 baseline, vmin, vmax, dB, sfreq):
     """Aux Function to prepare tfr computation"""
     from ..viz.utils import _setup_vmin_vmax
 
-    if mode is not None and baseline is not None:
-        logger.info("Applying baseline correction '%s' during %s" %
-                    (mode, baseline))
-        data = rescale(data.copy(), times, baseline, mode)
+    copy = baseline is not None
+    data = rescale(data, times, baseline, mode, copy=copy)
 
     # crop time
     itmin, itmax = None, None
-    idx = np.where(_time_mask(times, tmin, tmax))[0]
+    idx = np.where(_time_mask(times, tmin, tmax, sfreq=sfreq))[0]
     if tmin is not None:
         itmin = idx[0]
     if tmax is not None:
@@ -521,7 +519,7 @@ def _preproc_tfr(data, times, freqs, tmin, tmax, fmin, fmax, mode,
 
     # crop freqs
     ifmin, ifmax = None, None
-    idx = np.where(_time_mask(freqs, fmin, fmax))[0]
+    idx = np.where(_time_mask(freqs, fmin, fmax, sfreq=sfreq))[0]
     if fmin is not None:
         ifmin = idx[0]
     if fmax is not None:
@@ -612,9 +610,9 @@ class AverageTFR(ContainsMixin, UpdateChannelsMixin):
             If False epochs is cropped in place.
         """
         inst = self if not copy else self.copy()
-        mask = _time_mask(inst.times, tmin, tmax)
+        mask = _time_mask(inst.times, tmin, tmax, sfreq=self.info['sfreq'])
         inst.times = inst.times[mask]
-        inst.data = inst.data[..., mask]
+        inst.data = inst.data[:, :, mask]
         return inst
 
     @verbose
@@ -699,7 +697,7 @@ class AverageTFR(ContainsMixin, UpdateChannelsMixin):
 
         data, times, freqs, vmin, vmax = \
             _preproc_tfr(data, times, freqs, tmin, tmax, fmin, fmax, mode,
-                         baseline, vmin, vmax, dB)
+                         baseline, vmin, vmax, dB, info['sfreq'])
 
         tmin, tmax = times[0], times[-1]
         if isinstance(axes, plt.Axes):
@@ -852,7 +850,7 @@ class AverageTFR(ContainsMixin, UpdateChannelsMixin):
 
         data, times, freqs, vmin, vmax = \
             _preproc_tfr(data, times, freqs, tmin, tmax, fmin, fmax,
-                         mode, baseline, vmin, vmax, dB)
+                         mode, baseline, vmin, vmax, dB, info['sfreq'])
 
         if layout is None:
             from mne import find_layout
@@ -909,7 +907,8 @@ class AverageTFR(ContainsMixin, UpdateChannelsMixin):
         s += ', channels : %d' % self.data.shape[0]
         return "<AverageTFR  |  %s>" % s
 
-    def apply_baseline(self, baseline, mode='mean'):
+    @verbose
+    def apply_baseline(self, baseline, mode='mean', verbose=None):
         """Baseline correct the data
 
         Parameters
@@ -928,6 +927,8 @@ class AverageTFR(ContainsMixin, UpdateChannelsMixin):
             deviation of power during baseline after subtracting the mean,
             power = [power - mean(power_baseline)] / std(power_baseline))
             If None, baseline no correction will be performed.
+        verbose : bool, str, int, or None
+            If not None, override default verbose level (see mne.verbose).
         """
         self.data = rescale(self.data, self.times, baseline, mode, copy=False)
 
@@ -1065,8 +1066,9 @@ class AverageTFR(ContainsMixin, UpdateChannelsMixin):
 def _prepare_write_tfr(tfr, condition):
     """Aux function"""
     return (condition, dict(times=tfr.times, freqs=tfr.freqs,
-                            data=tfr.data, info=tfr.info, nave=tfr.nave,
-                            comment=tfr.comment, method=tfr.method))
+                            data=tfr.data, info=tfr.info.to_dict(),
+                            nave=tfr.nave, comment=tfr.comment,
+                            method=tfr.method))
 
 
 def write_tfrs(fname, tfr, overwrite=False):
@@ -1274,8 +1276,8 @@ def _induced_power_mtm(data, sfreq, frequencies, time_bandwidth=4.0,
     logger.info('Using %d tapers', n_taps)
     n_times_wavelets = Ws[0][0].shape[0]
     if n_times <= n_times_wavelets:
-        warnings.warn("Time windows are as long or longer than the epoch. "
-                      "Consider reducing n_cycles.")
+        warn('Time windows are as long or longer than the epoch. Consider '
+             'reducing n_cycles.')
     psd = np.zeros((n_channels, n_frequencies, n_times))
     itc = np.zeros((n_channels, n_frequencies, n_times))
     parallel, my_time_frequency, _ = parallel_func(_time_frequency,

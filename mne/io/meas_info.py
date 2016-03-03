@@ -4,10 +4,11 @@
 #
 # License: BSD (3-clause)
 
-from warnings import warn
+import collections
 from copy import deepcopy
 from datetime import datetime as dt
 import os.path as op
+import itertools
 
 import numpy as np
 from scipy import linalg
@@ -24,7 +25,7 @@ from .write import (start_file, end_file, start_block, end_block,
                     write_coord_trans, write_ch_info, write_name_list,
                     write_julian, write_float_matrix)
 from .proc_history import _read_proc_history, _write_proc_history
-from ..utils import logger, verbose
+from ..utils import logger, verbose, object_hash, warn
 from ..fixes import Counter
 from .. import __version__
 from ..externals.six import b, BytesIO, string_types, text_type
@@ -47,7 +48,76 @@ def _summarize_str(st):
     return st[:56][::-1].split(',', 1)[-1][::-1] + ', ...'
 
 
-class Info(dict):
+class _ChannelNameList(collections.Sequence):
+    """A read-only list, used to provide convenient access to channel names.
+
+    This list is linked to an Info object. Any changes to the `chs` field of
+    this object are automatically reflected by this list.
+
+    Parameters
+    ----------
+    info : instance of Info
+        The Info structure containing the channel list.
+    """
+    def __init__(self, info):
+        self._channels = info['chs']
+
+    def __getitem__(self, index):
+        """Retrieve the name of the channel with the given index"""
+        if isinstance(index, slice):
+            return [ch['ch_name'] for ch in self._channels[index]]
+        else:
+            return self._channels[index]['ch_name']
+
+    def __len__(self):
+        """Length of the list"""
+        return len(self._channels)
+
+    def __eq__(self, other):
+        """Test for equality"""
+        if isinstance(other, _ChannelNameList):
+            return list(self) == list(other)
+        elif isinstance(other, list):
+            return list(self) == other
+        else:
+            raise ValueError('Cannot compare _ChannelNameList and %s'
+                             % type(other))
+
+    def __ne__(self, other):
+        """Test for non-equality"""
+        return not self.__eq__(other)
+
+    def __repr__(self):
+        """String representation"""
+        if len(self) < 10:
+            channels = ', '.join(self)
+        else:
+            channels = ', '.join(self[:5]) + ' ... ' + ', '.join(self[-5:])
+
+        return '<ChannelNameList | %d channels | %s>' % (len(self), channels)
+
+    def __add__(self, other):
+        """Return a list containing the channels names in both lists"""
+        return list(self) + list(other)
+
+    # Raise descriptive error when the user tries to modify this list.
+    _read_only_error = ("This list of channel names is read-only. It is "
+                        "automatically computed by the info object. "
+                        "Instead of modifying this list, make your "
+                        "modifications to the list of channels in the info "
+                        "object (info['chs']).")
+
+    def __setitem__(self, index, value):
+        raise RuntimeError(_ChannelNameList._read_only_error)
+
+    def __iadd__(self, value):
+        raise RuntimeError(_ChannelNameList._read_only_error)
+
+    def append(self, value):
+        raise RuntimeError(_ChannelNameList._read_only_error)
+
+
+class Info(collections.MutableMapping):
     """Information about the recording.
 
     This data structure behaves like a dictionary. It contains all meta-data
@@ -60,8 +130,11 @@ class Info(dict):
     bads : list of str
         List of bad (noisy/broken) channels, by name. These channels will by
         default be ignored by many processing steps.
-    ch_names : list of str
+    ch_names : list-like of str (read-only)
         The names of the channels.
+        This object behaves like a read-only Python list. Behind the scenes
+        it iterates over the channels dictionaries in `info['chs']`:
+        `info['ch_names'][x] == info['chs'][x]['ch_name']`
     chs : list of dict
         A list of channel information structures.
         See: :ref:`faq` for details.
@@ -142,12 +215,28 @@ class Info(dict):
         Name of the project the experiment belongs to.
     subject_info : dict | None
         Information about the subject.
-        See: :ref:`subject_info` for details
     proc_history : list of dict | None | not present in dict
         The SSS info, the CTC correction and the calibaraions from the SSS
         processing logs inside of a raw file.
         See: :ref:`faq` for details.
     """
+    # These fields are read only and are computed from other fields
+    _read_only_fields = {
+        'nchan': lambda info: len(info['chs']),
+        'ch_names': lambda info: _ChannelNameList(info),
+    }
+
+    def __init__(self, *args, **kwargs):
+        self._store = dict()
+
+        # When initializing from a dict, silently ignore read-only fields.
+        # This is to keep backwards compatibility.
+        if len(args) == 1 and len(kwargs) == 0 and isinstance(args[0], dict):
+            for key, value in args[0].items():
+                if key not in Info._read_only_fields:
+                    self._store[key] = value
+        else:
+            self.update(dict(*args, **kwargs))
 
     def copy(self):
         """Copy the instance
@@ -157,7 +246,83 @@ class Info(dict):
         info : instance of Info
             The copied info.
         """
-        return Info(super(Info, self).copy())
+        return Info(self._store)
+
+    def to_dict(self):
+        """Obtain a version of this info object in the form of a plain Python
+        dict
+
+        While the Info object behaves like a dict, it is a subclass of
+        MutableMapping. Use this function to cast it to an actual dict. Be
+        aware that the read-only fields will become writable and will no longer
+        auto-update.
+
+        Notes
+        -----
+        - To cast the plain dict back to an instance of Info, use:
+          `mne.io.Info(info_dict)`
+        - Always use a propert instance of Info when calling MNE-Python
+          functions.
+        """
+        info_dict = dict(self)
+        # Convert non-standard fields
+        info_dict['ch_names'] = list(info_dict['ch_names'])
+        return info_dict
+
+    def __getitem__(self, key):
+        """Retrieve a value from the data store
+
+        Parameters
+        ----------
+        key : str
+            The key associated with the value to retrieve
+
+        Returns
+        -------
+        value : object
+            The value associated with the key
+        """
+        try:
+            return Info._read_only_fields[key](self)
+        except KeyError:
+            return self._store[key]
+
+    def __setitem__(self, key, value):
+        """Store a value in the data store
+
+        Parameters
+        ----------
+        key : str
+            The key associated with the value for later retrieval
+        value : object
+            The value associated with the key
+        """
+        if key in Info._read_only_fields:
+            raise ValueError('The field %s is read only.' % key)
+        else:
+            self._store[key] = value
+
+    def __delitem__(self, key):
+        """Remove a value from the store
+
+        Parameters
+        ----------
+        key : str
+            The key associated with the value to remove
+        """
+        if key in Info._read_only_fields:
+            raise ValueError('The field %s is read only.' % key)
+        else:
+            del self._store[key]
+
+    # Make the read-only fields show up in info.items()
+    def __iter__(self):
+        return itertools.chain(self._store.keys(),
+                               Info._read_only_fields.keys())
+
+    # Read-only fields add to the length of the info object
+    def __len__(self):
+        return len(self._store) + len(Info._read_only_fields)
 
     def __repr__(self):
         """Summarize info instead of printing all"""
@@ -196,6 +361,8 @@ class Info(dict):
                                             for ch_type, count
                                             in ch_counts.items())
             strs.append('%s : %s%s' % (k, str(type(v))[7:-2], entr))
+            if k in ['sfreq', 'lowpass', 'highpass']:
+                strs[-1] += ' Hz'
         strs_non_empty = sorted(s for s in strs if '|' in s)
         strs_empty = sorted(s for s in strs if '|' not in s)
         st = '\n    '.join(strs_non_empty + strs_empty)
@@ -213,16 +380,21 @@ class Info(dict):
         if len(missing) > 0:
             raise RuntimeError('bad channel(s) %s marked do not exist in info'
                                % (missing,))
-        chs = [ch['ch_name'] for ch in self['chs']]
-        if len(self['ch_names']) != len(chs) or any(
-                ch_1 != ch_2 for ch_1, ch_2 in zip(self['ch_names'], chs)) or \
-                self['nchan'] != len(chs):
-            raise RuntimeError('info channel name inconsistency detected, '
-                               'please notify mne-python developers')
         # make sure we have the proper datatypes
         for key in ('sfreq', 'highpass', 'lowpass'):
             if self.get(key) is not None:
                 self[key] = float(self[key])
+
+        # make sure channel names are unique
+        unique_ids = np.unique(self['ch_names'], return_index=True)[1]
+        if len(unique_ids) != self['nchan']:
+            dups = set(self['ch_names'][x]
+                       for x in np.setdiff1d(range(self['nchan']), unique_ids))
+            raise RuntimeError('Channel names are not unique, found '
+                               'duplicates for: %s' % dups)
+
+    def __hash__(self):
+        return object_hash(self._store)
 
 
 def read_fiducials(fname):
@@ -300,8 +472,29 @@ def write_fiducials(fname, pts, coord_frame=0):
     end_file(fid)
 
 
+def _read_dig_fif(fid, meas_info):
+    """Helper to read digitizer data from a FIFF file"""
+    isotrak = dir_tree_find(meas_info, FIFF.FIFFB_ISOTRAK)
+    dig = None
+    if len(isotrak) == 0:
+        logger.info('Isotrak not found')
+    elif len(isotrak) > 1:
+        warn('Multiple Isotrak found')
+    else:
+        isotrak = isotrak[0]
+        dig = []
+        for k in range(isotrak['nent']):
+            kind = isotrak['directory'][k].kind
+            pos = isotrak['directory'][k].pos
+            if kind == FIFF.FIFF_DIG_POINT:
+                tag = read_tag(fid, pos)
+                dig.append(tag.data)
+                dig[-1]['coord_frame'] = FIFF.FIFFV_COORD_HEAD
+    return dig
+
+
 def _read_dig_points(fname, comments='%'):
-    """Read digitizer data from file.
+    """Read digitizer data from a text file.
 
     This function can read space-delimited text files of digitizer data.
 
@@ -327,7 +520,7 @@ def _read_dig_points(fname, comments='%'):
 
 
 def _write_dig_points(fname, dig_points):
-    """Write points to file
+    """Write points to text file
 
     Parameters
     ----------
@@ -360,7 +553,7 @@ def _write_dig_points(fname, dig_points):
 
 
 def _make_dig_points(nasion=None, lpa=None, rpa=None, hpi=None,
-                     dig_points=None):
+                     dig_points=None, dig_ch_pos=None):
     """Constructs digitizer info for the info.
 
     Parameters
@@ -375,6 +568,8 @@ def _make_dig_points(nasion=None, lpa=None, rpa=None, hpi=None,
         Points designated as head position indicator points.
     dig_points : array-like | numpy.ndarray, shape (n_points, 3)
         Points designed as the headshape points.
+    dig_ch_pos : dict
+        Dict of EEG channel positions.
 
     Returns
     -------
@@ -387,7 +582,7 @@ def _make_dig_points(nasion=None, lpa=None, rpa=None, hpi=None,
         if lpa.shape == (3,):
             dig.append({'r': lpa, 'ident': FIFF.FIFFV_POINT_LPA,
                         'kind': FIFF.FIFFV_POINT_CARDINAL,
-                        'coord_frame':  FIFF.FIFFV_COORD_HEAD})
+                        'coord_frame': FIFF.FIFFV_COORD_HEAD})
         else:
             msg = ('LPA should have the shape (3,) instead of %s'
                    % (lpa.shape,))
@@ -397,7 +592,7 @@ def _make_dig_points(nasion=None, lpa=None, rpa=None, hpi=None,
         if nasion.shape == (3,):
             dig.append({'r': nasion, 'ident': FIFF.FIFFV_POINT_NASION,
                         'kind': FIFF.FIFFV_POINT_CARDINAL,
-                        'coord_frame':  FIFF.FIFFV_COORD_HEAD})
+                        'coord_frame': FIFF.FIFFV_COORD_HEAD})
         else:
             msg = ('Nasion should have the shape (3,) instead of %s'
                    % (nasion.shape,))
@@ -407,7 +602,7 @@ def _make_dig_points(nasion=None, lpa=None, rpa=None, hpi=None,
         if rpa.shape == (3,):
             dig.append({'r': rpa, 'ident': FIFF.FIFFV_POINT_RPA,
                         'kind': FIFF.FIFFV_POINT_CARDINAL,
-                        'coord_frame':  FIFF.FIFFV_COORD_HEAD})
+                        'coord_frame': FIFF.FIFFV_COORD_HEAD})
         else:
             msg = ('RPA should have the shape (3,) instead of %s'
                    % (rpa.shape,))
@@ -434,7 +629,12 @@ def _make_dig_points(nasion=None, lpa=None, rpa=None, hpi=None,
             msg = ('Points should have the shape (n_points, 3) instead of '
                    '%s' % (dig_points.shape,))
             raise ValueError(msg)
-
+    if dig_ch_pos is not None:
+        keys = sorted(dig_ch_pos.keys())
+        for key in keys:
+            dig.append({'r': dig_ch_pos[key], 'ident': int(key[-3:]),
+                        'kind': FIFF.FIFFV_POINT_EEG,
+                        'coord_frame': FIFF.FIFFV_COORD_HEAD})
     return dig
 
 
@@ -543,7 +743,7 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
     proj_name = None
     line_freq = None
     custom_ref_applied = False
-    p = 0
+    xplotter_layout = None
     for k in range(meas_info['nent']):
         kind = meas_info['directory'][k].kind
         pos = meas_info['directory'][k].pos
@@ -556,7 +756,6 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
         elif kind == FIFF.FIFF_CH_INFO:
             tag = read_tag(fid, pos)
             chs.append(tag.data)
-            p += 1
         elif kind == FIFF.FIFF_LOWPASS:
             tag = read_tag(fid, pos)
             lowpass = float(tag.data)
@@ -597,6 +796,9 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
         elif kind in [FIFF.FIFF_MNE_CUSTOM_REF, 236]:  # 236 used before v0.11
             tag = read_tag(fid, pos)
             custom_ref_applied = bool(tag.data)
+        elif kind == FIFF.FIFF_XPLOTTER_LAYOUT:
+            tag = read_tag(fid, pos)
+            xplotter_layout = str(tag.data)
 
     # Check that we have everything we need
     if nchan is None:
@@ -631,22 +833,7 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
                         ctf_head_t = cand
 
     #   Locate the Polhemus data
-    isotrak = dir_tree_find(meas_info, FIFF.FIFFB_ISOTRAK)
-    dig = None
-    if len(isotrak) == 0:
-        logger.info('Isotrak not found')
-    elif len(isotrak) > 1:
-        warn('Multiple Isotrak found')
-    else:
-        isotrak = isotrak[0]
-        dig = []
-        for k in range(isotrak['nent']):
-            kind = isotrak['directory'][k].kind
-            pos = isotrak['directory'][k].pos
-            if kind == FIFF.FIFF_DIG_POINT:
-                tag = read_tag(fid, pos)
-                dig.append(tag.data)
-                dig[-1]['coord_frame'] = FIFF.FIFFV_COORD_HEAD
+    dig = _read_dig_fif(fid, meas_info)
 
     #   Locate the acquisition information
     acqpars = dir_tree_find(meas_info, FIFF.FIFFB_DACQ_PARS)
@@ -860,7 +1047,6 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
     else:
         info['meas_date'] = meas_date
 
-    info['nchan'] = nchan
     info['sfreq'] = sfreq
     info['highpass'] = highpass if highpass is not None else 0.
     info['lowpass'] = lowpass if lowpass is not None else info['sfreq'] / 2.0
@@ -869,7 +1055,6 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
     #   Add the channel information and make a list of channel names
     #   for convenience
     info['chs'] = chs
-    info['ch_names'] = [ch['ch_name'] for ch in chs]
 
     #
     #  Add the coordinate transformations
@@ -893,6 +1078,7 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
     info['acq_pars'] = acq_pars
     info['acq_stim'] = acq_stim
     info['custom_ref_applied'] = custom_ref_applied
+    info['xplotter_layout'] = xplotter_layout
     info._check_consistency()
 
     return info, meas
@@ -1054,6 +1240,8 @@ def write_meas_info(fid, info, data_type=None, reset_range=True):
         write_int(fid, FIFF.FIFF_DATA_PACK, data_type)
     if info.get('custom_ref_applied'):
         write_int(fid, FIFF.FIFF_MNE_CUSTOM_REF, info['custom_ref_applied'])
+    if info.get('xplotter_layout'):
+        write_string(fid, FIFF.FIFF_XPLOTTER_LAYOUT, info['xplotter_layout'])
 
     #  Channel information
     for k, c in enumerate(info['chs']):
@@ -1254,17 +1442,15 @@ def _merge_info(infos, verbose=None):
     for info in infos:
         info._check_consistency()
     info = Info()
-    ch_names = _merge_dict_values(infos, 'ch_names')
-    duplicates = set([ch for ch in ch_names if ch_names.count(ch) > 1])
+    info['chs'] = []
+    for this_info in infos:
+        info['chs'].extend(this_info['chs'])
+    duplicates = set([ch for ch in info['ch_names']
+                      if info['ch_names'].count(ch) > 1])
     if len(duplicates) > 0:
         msg = ("The following channels are present in more than one input "
                "measurement info objects: %s" % list(duplicates))
         raise ValueError(msg)
-    info['nchan'] = len(ch_names)
-    info['ch_names'] = ch_names
-    info['chs'] = []
-    for this_info in infos:
-        info['chs'].extend(this_info['chs'])
 
     transforms = ['ctf_head_t', 'dev_head_t', 'dev_ctf_t']
     for trans_name in transforms:
@@ -1288,7 +1474,7 @@ def _merge_info(infos, verbose=None):
                     'hpi_results', 'hpi_meas', 'hpi_subsystem', 'events',
                     'line_freq', 'lowpass', 'meas_date', 'meas_id',
                     'proj_id', 'proj_name', 'projs', 'sfreq',
-                    'subject_info', 'sfreq']
+                    'subject_info', 'sfreq', 'xplotter_layout']
 
     for k in other_fields:
         info[k] = _merge_dict_values(infos, k)
@@ -1344,8 +1530,6 @@ def create_info(ch_names, sfreq, ch_types=None, montage=None):
         raise ValueError('ch_types and ch_names must be the same length')
     info = _empty_info(sfreq)
     info['meas_date'] = np.array([0, 0], np.int32)
-    info['ch_names'] = ch_names
-    info['nchan'] = nchan
     loc = np.concatenate((np.zeros(3), np.eye(3).ravel())).astype(np.float32)
     for ci, (name, kind) in enumerate(zip(ch_names, ch_types)):
         if not isinstance(name, string_types):
@@ -1386,6 +1570,7 @@ RAW_INFO_FIELDS = (
     'file_id', 'filename', 'highpass', 'hpi_meas', 'hpi_results',
     'hpi_subsystem', 'line_freq', 'lowpass', 'meas_date', 'meas_id', 'nchan',
     'proj_id', 'proj_name', 'projs', 'sfreq', 'subject_info',
+    'xplotter_layout',
 )
 
 
@@ -1397,23 +1582,19 @@ def _empty_info(sfreq):
         'dev_ctf_t', 'dig', 'experimenter',
         'file_id', 'filename', 'highpass', 'hpi_subsystem', 'line_freq',
         'lowpass', 'meas_date', 'meas_id', 'proj_id', 'proj_name',
-        'subject_info',
+        'subject_info', 'xplotter_layout',
     )
-    _list_keys = (
-        'bads', 'ch_names', 'chs', 'comps', 'events', 'hpi_meas',
-        'hpi_results', 'projs',
-    )
+    _list_keys = ('bads', 'chs', 'comps', 'events', 'hpi_meas', 'hpi_results',
+                  'projs')
     info = Info()
     for k in _none_keys:
         info[k] = None
     for k in _list_keys:
         info[k] = list()
     info['custom_ref_applied'] = False
-    info['nchan'] = 0
     info['dev_head_t'] = Transform('meg', 'head', np.eye(4))
     info['highpass'] = 0.
     info['sfreq'] = float(sfreq)
     info['lowpass'] = info['sfreq'] / 2.
-    assert set(info.keys()) == set(RAW_INFO_FIELDS)
     info._check_consistency()
     return info

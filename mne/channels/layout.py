@@ -16,8 +16,10 @@ import os.path as op
 import numpy as np
 
 from ..transforms import _polar_to_cartesian, _cartesian_to_sphere
+from ..bem import fit_sphere_to_headshape
 from ..io.pick import pick_types
 from ..io.constants import FIFF
+from ..io.meas_info import Info
 from ..utils import _clean_names
 from ..externals.six.moves import map
 
@@ -156,7 +158,6 @@ def read_layout(kind, path=None, scale=True):
     """
     if path is None:
         path = op.join(op.dirname(__file__), 'data', 'layouts')
-
     if not kind.endswith('.lout') and op.exists(op.join(path, kind + '.lout')):
         kind += '.lout'
     elif not kind.endswith('.lay') and op.exists(op.join(path, kind + '.lay')):
@@ -408,10 +409,13 @@ def find_layout(info, ch_type=None, exclude='bads'):
     elif has_vv_only_mag or (has_vv_meg and ch_type == 'mag'):
         layout_name = 'Vectorview-mag'
     elif has_vv_only_grad or (has_vv_meg and ch_type == 'grad'):
-        layout_name = 'Vectorview-grad'
+        if info['ch_names'][0].endswith('X'):
+            layout_name = 'Vectorview-grad_norm'
+        else:
+            layout_name = 'Vectorview-grad'
     elif ((has_eeg_coils_only and ch_type in [None, 'eeg']) or
           (has_eeg_coils_and_meg and ch_type == 'eeg')):
-        if not isinstance(info, dict):
+        if not isinstance(info, (dict, Info)):
             raise RuntimeError('Cannot make EEG layout, no measurement info '
                                'was passed to `find_layout`')
         return make_eeg_layout(info, exclude=exclude)
@@ -419,9 +423,9 @@ def find_layout(info, ch_type=None, exclude='bads'):
         layout_name = 'magnesWH3600'
     elif has_CTF_grad:
         layout_name = 'CTF-275'
-    elif n_kit_grads == 157:
+    elif n_kit_grads <= 157:
         layout_name = 'KIT-157'
-    elif n_kit_grads == 208:
+    elif n_kit_grads > 157:
         layout_name = 'KIT-AD'
     else:
         return None
@@ -620,9 +624,7 @@ def _auto_topomap_coords(info, picks):
         dig_kinds = (FIFF.FIFFV_POINT_CARDINAL,
                      FIFF.FIFFV_POINT_EEG,
                      FIFF.FIFFV_POINT_EXTRA)
-        from ..preprocessing.maxfilter import fit_sphere_to_headshape
-        _, origin_head, _ = fit_sphere_to_headshape(info, dig_kinds)
-        origin_head /= 1000.  # to meters
+        _, origin_head, _ = fit_sphere_to_headshape(info, dig_kinds, units='m')
         locs3d -= origin_head
 
         # Match the digitization points with the requested
@@ -634,7 +636,7 @@ def _auto_topomap_coords(info, picks):
     dist = pdist(locs3d)
     if np.min(dist) < 1e-10:
         problematic_electrodes = [
-            info['ch_names'][elec_i]
+            chs[elec_i]['ch_name']
             for elec_i in squareform(dist < 1e-10).any(axis=0).nonzero()[0]
         ]
 

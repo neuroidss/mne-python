@@ -7,7 +7,7 @@ import warnings
 
 from numpy.testing import assert_raises
 
-from mne import io, read_events, pick_types
+from mne import io, read_events, pick_types, Annotations
 from mne.utils import requires_version, run_tests_if_main
 from mne.viz.utils import _fake_click
 from mne.viz import plot_raw
@@ -25,6 +25,9 @@ event_name = op.join(base_dir, 'test-eve.fif')
 
 def _get_raw():
     raw = io.Raw(raw_fname, preload=True)
+    # Throws a warning about a changed unit.
+    with warnings.catch_warnings(record=True):
+        raw.set_channel_types({raw.ch_names[0]: 'ias'})
     raw.pick_channels(raw.ch_names[:9])
     return raw
 
@@ -86,6 +89,9 @@ def test_plot_raw():
         # Color setting
         assert_raises(KeyError, raw.plot, event_color={0: 'r'})
         assert_raises(TypeError, raw.plot, event_color={'foo': 'r'})
+        annot = Annotations([10, 10 + raw.first_samp / raw.info['sfreq']],
+                            [10, 10], ['test', 'test'], raw.info['meas_date'])
+        raw.annotations = annot
         fig = plot_raw(raw, events=events, event_color={-1: 'r', 998: 'b'})
         plt.close('all')
 

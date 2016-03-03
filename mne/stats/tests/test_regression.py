@@ -51,7 +51,7 @@ def test_regression():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter('always')
         lm = linear_regression(epochs, design_matrix, ['intercept', 'aud'])
-        assert_true(w[0].category == UserWarning)
+        assert_true(w[0].category == RuntimeWarning)
         assert_true('non-data' in '%s' % w[0].message)
 
     for predictor, parameters in lm.items():
@@ -103,9 +103,21 @@ def test_continuous_regression_no_overlap():
                                      tmin=tmin, tmax=tmax,
                                      reject=None)
 
+    # Check that evokeds and revokeds are nearly equivalent
     for cond in event_id.keys():
         assert_allclose(revokeds[cond].data,
                         epochs[cond].average().data)
+
+    # Test events that will lead to "duplicate" errors
+    old_latency = events[1, 0]
+    events[1, 0] = events[0, 0]
+    assert_raises(ValueError, linear_regression_raw,
+                  raw, events, event_id, tmin, tmax)
+
+    events[1, 0] = old_latency
+    events[:, 0] = range(len(events))
+    assert_raises(ValueError, linear_regression_raw, raw,
+                  events, event_id, tmin, tmax, decim=2)
 
 
 def test_continuous_regression_with_overlap():

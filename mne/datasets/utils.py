@@ -8,11 +8,11 @@ import os
 import os.path as op
 import shutil
 import tarfile
-from warnings import warn
 import stat
+import sys
 
 from .. import __version__ as mne_version
-from ..utils import get_config, set_config, _fetch_file, logger
+from ..utils import get_config, set_config, _fetch_file, logger, warn
 from ..externals.six import string_types
 from ..externals.six.moves import input
 
@@ -95,32 +95,32 @@ def _dataset_version(path, name):
 def _get_path(path, key, name):
     """Helper to get a dataset path"""
     if path is None:
-            # use an intelligent guess if it's not defined
-            def_path = op.realpath(op.join(op.dirname(__file__), '..', '..',
-                                           '..', 'examples'))
-            if get_config(key) is None:
-                key = 'MNE_DATA'
-            path = get_config(key, def_path)
+        # use an intelligent guess if it's not defined
+        def_path = op.realpath(op.join(op.dirname(__file__), '..', '..',
+                                       'examples'))
+        if get_config(key) is None:
+            key = 'MNE_DATA'
+        path = get_config(key, def_path)
 
-            # use the same for all datasets
-            if not op.exists(path) or not os.access(path, os.W_OK):
+        # use the same for all datasets
+        if not op.exists(path) or not os.access(path, os.W_OK):
+            try:
+                os.mkdir(path)
+            except OSError:
                 try:
-                    os.mkdir(path)
+                    logger.info('Checking for %s data in '
+                                '"~/mne_data"...' % name)
+                    path = op.join(op.expanduser("~"), "mne_data")
+                    if not op.exists(path):
+                        logger.info("Trying to create "
+                                    "'~/mne_data' in home directory")
+                        os.mkdir(path)
                 except OSError:
-                    try:
-                        logger.info('Checking for %s data in '
-                                    '"~/mne_data"...' % name)
-                        path = op.join(op.expanduser("~"), "mne_data")
-                        if not op.exists(path):
-                            logger.info("Trying to create "
-                                        "'~/mne_data' in home directory")
-                            os.mkdir(path)
-                    except OSError:
-                        raise OSError("User does not have write permissions "
-                                      "at '%s', try giving the path as an "
-                                      "argument to data_path() where user has "
-                                      "write permissions, for ex:data_path"
-                                      "('/home/xyz/me2/')" % (path))
+                    raise OSError("User does not have write permissions "
+                                  "at '%s', try giving the path as an "
+                                  "argument to data_path() where user has "
+                                  "write permissions, for ex:data_path"
+                                  "('/home/xyz/me2/')" % (path))
     if not isinstance(path, string_types):
         raise ValueError('path must be a string or None')
     return path
@@ -132,10 +132,13 @@ def _do_path_update(path, update_path, key, name):
     if update_path is None:
         if get_config(key, '') != path:
             update_path = True
-            msg = ('Do you want to set the path:\n    %s\nas the default '
-                   '%s dataset path in the mne-python config [y]/n? '
-                   % (path, name))
-            answer = input(msg)
+            if '--update-dataset-path' in sys.argv:
+                answer = 'y'
+            else:
+                msg = ('Do you want to set the path:\n    %s\nas the default '
+                       '%s dataset path in the mne-python config [y]/n? '
+                       % (path, name))
+                answer = input(msg)
             if answer.lower() == 'n':
                 update_path = False
         else:
@@ -151,59 +154,67 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
                archive_name=None):
     """Aux function
     """
-    key = {'sample': 'MNE_DATASETS_SAMPLE_PATH',
-           'spm': 'MNE_DATASETS_SPM_FACE_PATH',
-           'somato': 'MNE_DATASETS_SOMATO_PATH',
-           'brainstorm': 'MNE_DATASETS_BRAINSTORM_PATH',
-           'testing': 'MNE_DATASETS_TESTING_PATH',
-           'fake': 'MNE_DATASETS_FAKE_PATH',
-           }[name]
+    key = {
+        'fake': 'MNE_DATASETS_FAKE_PATH',
+        'misc': 'MNE_DATASETS_MISC_PATH',
+        'sample': 'MNE_DATASETS_SAMPLE_PATH',
+        'spm': 'MNE_DATASETS_SPM_FACE_PATH',
+        'somato': 'MNE_DATASETS_SOMATO_PATH',
+        'brainstorm': 'MNE_DATASETS_BRAINSTORM_PATH',
+        'testing': 'MNE_DATASETS_TESTING_PATH',
+    }[name]
 
     path = _get_path(path, key, name)
-    # To update the testing dataset, push commits, then make a new release
-    # on GitHub. Then update the "testing_release" variable:
-    testing_release = '0.11'
+    # To update the testing or misc dataset, push commits, then make a new
+    # release on GitHub. Then update the "releases" variable:
+    releases = dict(testing='0.16', misc='0.1')
     # And also update the "hashes['testing']" variable below.
 
     # To update any other dataset, update the data archive itself (upload
     # an updated version) and update the hash.
     archive_names = dict(
+        misc='mne-misc-data-%s.tar.gz' % releases['misc'],
         sample='MNE-sample-data-processed.tar.gz',
-        spm='MNE-spm-face.tar.bz2',
         somato='MNE-somato-data.tar.gz',
-        testing='mne-testing-data-%s.tar.gz' % testing_release,
+        spm='MNE-spm-face.tar.bz2',
+        testing='mne-testing-data-%s.tar.gz' % releases['testing'],
         fake='foo.tgz',
     )
     if archive_name is not None:
         archive_names.update(archive_name)
     folder_names = dict(
-        sample='MNE-sample-data',
-        spm='MNE-spm-face',
-        somato='MNE-somato-data',
         brainstorm='MNE-brainstorm-data',
-        testing='MNE-testing-data',
         fake='foo',
+        misc='MNE-misc-data',
+        sample='MNE-sample-data',
+        somato='MNE-somato-data',
+        spm='MNE-spm-face',
+        testing='MNE-testing-data',
     )
     urls = dict(
-        sample="https://s3.amazonaws.com/mne-python/datasets/%s",
-        spm='https://s3.amazonaws.com/mne-python/datasets/%s',
-        somato='https://s3.amazonaws.com/mne-python/datasets/%s',
         brainstorm='https://copy.com/ZTHXXFcuIZycvRoA/brainstorm/%s',
-        testing='https://codeload.github.com/mne-tools/mne-testing-data/'
-                'tar.gz/%s' % testing_release,
         fake='https://github.com/mne-tools/mne-testing-data/raw/master/'
              'datasets/%s',
+        misc='https://codeload.github.com/mne-tools/mne-misc-data/'
+             'tar.gz/%s' % releases['misc'],
+        sample="https://mne-tools.s3.amazonaws.com/datasets/%s",
+        somato='https://mne-tools.s3.amazonaws.com/datasets/%s',
+        spm='https://mne-tools.s3.amazonaws.com/datasets/%s',
+        testing='https://codeload.github.com/mne-tools/mne-testing-data/'
+                'tar.gz/%s' % releases['testing'],
     )
     hashes = dict(
-        sample='ccf5cbc41a3727ed02821330a07abb13',
-        spm='3e9e83c642136e5b720e2ecc5dcc3244',
-        somato='f3e3a8441477bb5bacae1d0c6e0964fb',
         brainstorm=None,
-        testing='d1753ce154e0e6af12f1b82b21e975ce',
         fake='3194e9f7b46039bb050a74f3e1ae9908',
+        misc='f0708d8914cf2692fee7b6c9f105e71c',
+        sample='ccf5cbc41a3727ed02821330a07abb13',
+        somato='f3e3a8441477bb5bacae1d0c6e0964fb',
+        spm='3e9e83c642136e5b720e2ecc5dcc3244',
+        testing='1f23321c65572a7b71e4902571447aa4',
     )
     folder_origs = dict(  # not listed means None
-        testing='mne-testing-data-%s' % testing_release,
+        misc='mne-misc-data-%s' % releases['misc'],
+        testing='mne-testing-data-%s' % releases['testing'],
     )
     folder_name = folder_names[name]
     archive_name = archive_names[name]
@@ -226,7 +237,10 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
         return ''
     if not op.exists(folder_path) or force_update:
         if name == 'brainstorm':
-            answer = input('%sAgree (y/[n])? ' % _bst_license_text)
+            if '--accept-brainstorm-license' in sys.argv:
+                answer = 'y'
+            else:
+                answer = input('%sAgree (y/[n])? ' % _bst_license_text)
             if answer.lower() != 'y':
                 raise RuntimeError('You must agree to the license to use this '
                                    'dataset')
@@ -299,7 +313,7 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
     try:
         from distutils.version import LooseVersion as LV
     except:
-        warn('Could not determine %s dataset version; dataset could\n'
+        warn('Could not determine %s dataset version; dataset could '
              'be out of date. Please install the "distutils" package.'
              % name)
     else:  # 0.7 < 0.7.git shoud be False, therefore strip
@@ -321,13 +335,15 @@ def _get_version(name):
 
 def has_dataset(name):
     """Helper for dataset presence"""
-    endswith = {'sample': 'MNE-sample-data',
-                'spm': 'MNE-spm-face',
-                'somato': 'MNE-somato-data',
-                'testing': 'MNE-testing-data',
-                'fake': 'foo',
-                'brainstorm': 'MNE_brainstorm-data',
-                }[name]
+    endswith = {
+        'brainstorm': 'MNE_brainstorm-data',
+        'fake': 'foo',
+        'misc': 'MNE-misc-data',
+        'sample': 'MNE-sample-data',
+        'somato': 'MNE-somato-data',
+        'spm': 'MNE-spm-face',
+        'testing': 'MNE-testing-data',
+    }[name]
     archive_name = None
     if name == 'brainstorm':
         archive_name = dict(brainstorm='bst_raw')

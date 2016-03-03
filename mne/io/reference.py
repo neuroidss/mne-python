@@ -12,7 +12,7 @@ from .pick import pick_types
 from .base import _BaseRaw
 from ..evoked import Evoked
 from ..epochs import _BaseEpochs
-from ..utils import logger
+from ..utils import logger, warn
 
 
 def _apply_reference(inst, ref_from, ref_to=None, copy=True):
@@ -185,7 +185,7 @@ def add_reference_channels(inst, ref_channels, copy=True):
         raise TypeError("inst should be Raw, Epochs, or Evoked instead of %s."
                         % type(inst))
     nchan = len(inst.info['ch_names'])
-    if ch in ref_channels:
+    for ch in ref_channels:
         chan_info = {'ch_name': ch,
                      'coil_type': FIFF.FIFFV_COIL_EEG,
                      'kind': FIFF.FIFFV_EEG_CH,
@@ -198,8 +198,6 @@ def add_reference_channels(inst, ref_channels, copy=True):
                      'coord_frame': FIFF.FIFFV_COORD_HEAD,
                      'loc': np.zeros(12)}
         inst.info['chs'].append(chan_info)
-    inst.info['ch_names'].extend(ref_channels)
-    inst.info['nchan'] = len(inst.info['ch_names'])
     if isinstance(inst, _BaseRaw):
         inst._cals = np.hstack((inst._cals, [1] * len(ref_channels)))
 
@@ -254,8 +252,8 @@ def set_eeg_reference(inst, ref_channels=None, copy=True):
     if ref_channels is None:
         # CAR requested
         if _has_eeg_average_ref_proj(inst.info['projs']):
-            logger.warning('An average reference projection was already '
-                           'added. The data has been left untouched.')
+            warn('An average reference projection was already added. The data '
+                 'has been left untouched.')
             return inst, None
         else:
             inst.info['custom_ref_applied'] = False
@@ -378,7 +376,6 @@ def set_bipolar_reference(inst, anode, cathode, ch_name=None, ch_info=None,
         an_idx = inst.ch_names.index(an)
         inst.info['chs'][an_idx] = info
         inst.info['chs'][an_idx]['ch_name'] = name
-        inst.info['ch_names'][an_idx] = name
         logger.info('Bipolar channel added as "%s".' % name)
 
     # Drop cathode channels

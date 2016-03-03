@@ -11,7 +11,6 @@
 # License: BSD (3-clause)
 
 from copy import deepcopy
-import warnings
 import json
 import os.path as op
 from distutils.version import LooseVersion
@@ -33,16 +32,15 @@ from .io.proj import setup_proj, ProjMixin, _proj_equal
 from .io.base import _BaseRaw, ToDataFrameMixin
 from .bem import _check_origin
 from .evoked import EvokedArray, _aspect_rev
-from .baseline import rescale
+from .baseline import rescale, _log_rescale
 from .channels.channels import (ContainsMixin, UpdateChannelsMixin,
                                 SetChannelsMixin, InterpolationMixin)
 from .filter import resample, detrend, FilterMixin
 from .event import _read_events_fif
 from .fixes import in1d, _get_args
-from .viz import (plot_epochs, _drop_log_stats,
-                  plot_epochs_psd, plot_epochs_psd_topomap)
+from .viz import plot_epochs, plot_epochs_psd, plot_epochs_psd_topomap
 from .utils import (check_fname, logger, verbose, _check_type_picks,
-                    _time_mask, check_random_state, object_hash)
+                    _time_mask, check_random_state, object_hash, warn)
 from .externals.six import iteritems, string_types
 from .externals.six.moves import zip
 
@@ -146,7 +144,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     This class provides basic functionality and should never be instantiated
     directly. See Epochs below for an explanation of the parameters.
     """
-    def __init__(self, info, data, events, event_id, tmin, tmax,
+    def __init__(self, info, data, events, event_id=None, tmin=-0.2, tmax=0.5,
                  baseline=(None, 0), raw=None,
                  picks=None, name='Unknown', reject=None, flat=None,
                  decim=1, reject_tmin=None, reject_tmax=None, detrend=None,
@@ -194,8 +192,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                     if on_missing == 'error':
                         raise ValueError(msg)
                     elif on_missing == 'warning':
-                        logger.warning(msg)
-                        warnings.warn(msg)
+                        warn(msg)
                     else:  # on_missing == 'ignore':
                         pass
 
@@ -214,9 +211,8 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             n_events = len(events)
             if n_events > 1:
                 if np.diff(events.astype(np.int64)[:, 0]).min() <= 0:
-                    warnings.warn('The events passed to the Epochs '
-                                  'constructor are not chronologically '
-                                  'ordered.', RuntimeWarning)
+                    warn('The events passed to the Epochs constructor are not '
+                         'chronologically ordered.', RuntimeWarning)
 
             if n_events > 0:
                 logger.info('%d matching events found' % n_events)
@@ -256,7 +252,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                     raise ValueError(err)
         if tmin > tmax:
             raise ValueError('tmin has to be less than or equal to tmax')
-
+        _log_rescale(baseline)
         self.baseline = baseline
         self.reject_tmin = reject_tmin
         self.reject_tmax = reject_tmax
@@ -317,7 +313,14 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         if preload_at_end:
             assert self._data is None
             assert self.preload is False
-            self.load_data()
+            self.load_data()  # this will do the projection
+        elif proj is True and self._projector is not None and data is not None:
+            # let's make sure we project if data was provided and proj
+            # requested
+            # we could do this with np.einsum, but iteration should be
+            # more memory safe in most instances
+            for ii, epoch in enumerate(self._data):
+                self._data[ii] = np.dot(self._projector, epoch)
 
     def load_data(self):
         """Load the data if not already preloaded
@@ -375,17 +378,15 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         new_sfreq = epochs.info['sfreq'] / float(decim)
         lowpass = epochs.info['lowpass']
         if decim > 1 and lowpass is None:
-            warnings.warn('The measurement information indicates data is not '
-                          'low-pass filtered. The decim=%i parameter will '
-                          'result in a sampling frequency of %g Hz, which can '
-                          'cause aliasing artifacts.'
-                          % (decim, new_sfreq))
+            warn('The measurement information indicates data is not low-pass '
+                 'filtered. The decim=%i parameter will result in a sampling '
+                 'frequency of %g Hz, which can cause aliasing artifacts.'
+                 % (decim, new_sfreq))
         elif decim > 1 and new_sfreq < 2.5 * lowpass:
-            warnings.warn('The measurement information indicates a low-pass '
-                          'frequency of %g Hz. The decim=%i parameter will '
-                          'result in a sampling frequency of %g Hz, which can '
-                          'cause aliasing artifacts.'
-                          % (lowpass, decim, new_sfreq))  # > 50% nyquist limit
+            warn('The measurement information indicates a low-pass frequency '
+                 'of %g Hz. The decim=%i parameter will result in a sampling '
+                 'frequency of %g Hz, which can cause aliasing artifacts.'
+                 % (lowpass, decim, new_sfreq))  # > 50% nyquist lim
 
         epochs._decim *= decim
         start_idx = int(round(epochs._raw_times[0] * (epochs.info['sfreq'] *
@@ -439,7 +440,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                            ref_meg=True, eog=True, ecg=True, seeg=True,
                            emg=True, exclude=[])
         data[:, picks, :] = rescale(data[:, picks, :], self.times, baseline,
-                                    'mean', copy=False)
+                                    copy=False)
         self.baseline = baseline
 
     def _reject_setup(self, reject, flat):
@@ -457,7 +458,9 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                                % (kind, bads))
 
         for key in idx.keys():
-            if len(idx[key]) == 0 and (key in reject or key in flat):
+            # don't throw an error if rejection/flat would do nothing
+            if len(idx[key]) == 0 and (np.isfinite(reject.get(key, np.inf)) or
+                                       flat.get(key, -1) >= 0):
                 # This is where we could eventually add e.g.
                 # self.allow_missing_reject_keys check to allow users to
                 # provide keys that don't exist in data
@@ -550,7 +553,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                            ref_meg=True, eog=True, ecg=True, seeg=True,
                            emg=True, exclude=[])
         epoch[picks] = rescale(epoch[picks], self._raw_times, self.baseline,
-                               'mean', copy=False, verbose=verbose)
+                               copy=False, verbose=False)
 
         # handle offset
         if self._offset is not None:
@@ -630,7 +633,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
 
         # handle SSPs
         if not self.proj and evoked.proj:
-            warnings.warn('Evoked has SSP applied while Epochs has not.')
+            warn('Evoked has SSP applied while Epochs has not.')
         if self.proj and not evoked.proj:
             evoked = evoked.copy().apply_proj()
 
@@ -754,8 +757,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             raise ValueError('No data channel found when averaging.')
 
         if evoked.nave < 1:
-            warnings.warn('evoked object is empty (based on less '
-                          'than 1 epoch)', RuntimeWarning)
+            warn('evoked object is empty (based on less than 1 epoch)')
 
         return evoked
 
@@ -822,10 +824,10 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                            n_epochs=n_epochs, n_channels=n_channels,
                            title=title, show=show, block=block)
 
-    def plot_psd(self, fmin=0, fmax=np.inf, proj=False, n_fft=256,
+    def plot_psd(self, fmin=0, fmax=np.inf, proj=False, bandwidth=None,
+                 adaptive=False, low_bias=True, normalization='length',
                  picks=None, ax=None, color='black', area_mode='std',
-                 area_alpha=0.33, n_overlap=0, dB=True,
-                 n_jobs=1, verbose=None, show=True):
+                 area_alpha=0.33, dB=True, n_jobs=1, verbose=None, show=True):
         """Plot the power spectral density across epochs
 
         Parameters
@@ -836,8 +838,19 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             End frequency to consider.
         proj : bool
             Apply projection.
-        n_fft : int
-            Number of points to use in Welch FFT calculations.
+        bandwidth : float
+            The bandwidth of the multi taper windowing function in Hz.
+            The default value is a window half-bandwidth of 4.
+        adaptive : bool
+            Use adaptive weights to combine the tapered spectra into PSD
+            (slow, use n_jobs >> 1 to speed up computation).
+        low_bias : bool
+            Only use tapers with more than 90% spectral concentration within
+            bandwidth.
+        normalization : str
+            Either "full" or "length" (default). If "full", the PSD will
+            be normalized by the sampling rate as well as the length of
+            the signal (as in nitime).
         picks : array-like of int | None
             List of channels to use.
         ax : instance of matplotlib Axes | None
@@ -851,8 +864,6 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             these calculations. If None, no area will be plotted.
         area_alpha : float
             Alpha for the area.
-        n_overlap : int
-            The number of points of overlap between blocks.
         dB : bool
             If True, transform data to decibels.
         n_jobs : int
@@ -868,18 +879,18 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             Figure distributing one image per channel across sensor topography.
         """
         return plot_epochs_psd(self, fmin=fmin, fmax=fmax, proj=proj,
-                               n_fft=n_fft, picks=picks, ax=ax,
-                               color=color, area_mode=area_mode,
-                               area_alpha=area_alpha,
-                               n_overlap=n_overlap, dB=dB, n_jobs=n_jobs,
-                               verbose=None, show=show)
+                               bandwidth=bandwidth, adaptive=adaptive,
+                               low_bias=low_bias, normalization=normalization,
+                               picks=picks, ax=ax, color=color,
+                               area_mode=area_mode, area_alpha=area_alpha,
+                               dB=dB, n_jobs=n_jobs, verbose=None, show=show)
 
     def plot_psd_topomap(self, bands=None, vmin=None, vmax=None, proj=False,
-                         n_fft=256, ch_type=None,
-                         n_overlap=0, layout=None, cmap='RdBu_r',
-                         agg_fun=None, dB=True, n_jobs=1, normalize=False,
-                         cbar_fmt='%0.3f', outlines='head', show=True,
-                         verbose=None):
+                         bandwidth=None, adaptive=False, low_bias=True,
+                         normalization='length', ch_type=None,
+                         layout=None, cmap='RdBu_r', agg_fun=None, dB=True,
+                         n_jobs=1, normalize=False, cbar_fmt='%0.3f',
+                         outlines='head', show=True, verbose=None):
         """Plot the topomap of the power spectral density across epochs
 
         Parameters
@@ -901,16 +912,25 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             output equals vmax(data). Defaults to None.
         proj : bool
             Apply projection.
-        n_fft : int
-            Number of points to use in Welch FFT calculations.
+        bandwidth : float
+            The bandwidth of the multi taper windowing function in Hz.
+            The default value is a window half-bandwidth of 4 Hz.
+        adaptive : bool
+            Use adaptive weights to combine the tapered spectra into PSD
+            (slow, use n_jobs >> 1 to speed up computation).
+        low_bias : bool
+            Only use tapers with more than 90% spectral concentration within
+            bandwidth.
+        normalization : str
+            Either "full" or "length" (default). If "full", the PSD will
+            be normalized by the sampling rate as well as the length of
+            the signal (as in nitime).
         ch_type : {None, 'mag', 'grad', 'planar1', 'planar2', 'eeg'}
             The channel type to plot. For 'grad', the gradiometers are
             collected in
             pairs and the RMS for each pair is plotted. If None, defaults to
             'mag' if MEG data are present and to 'eeg' if only EEG data are
             present.
-        n_overlap : int
-            The number of points of overlap between blocks.
         layout : None | Layout
             Layout instance specifying sensor positions (does not need to
             be specified for Neuromag data). If possible, the correct layout
@@ -956,8 +976,10 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             Figure distributing one image per channel across sensor topography.
         """
         return plot_epochs_psd_topomap(
-            self, bands=bands, vmin=vmin, vmax=vmax, proj=proj, n_fft=n_fft,
-            ch_type=ch_type, n_overlap=n_overlap, layout=layout, cmap=cmap,
+            self, bands=bands, vmin=vmin, vmax=vmax, proj=proj,
+            bandwidth=bandwidth, adaptive=adaptive,
+            low_bias=low_bias, normalization=normalization,
+            ch_type=ch_type, layout=layout, cmap=cmap,
             agg_fun=agg_fun, dB=dB, n_jobs=n_jobs, normalize=normalize,
             cbar_fmt=cbar_fmt, outlines=outlines, show=show, verbose=None)
 
@@ -1003,7 +1025,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         self._reject_setup(reject, flat)
         self._get_data(out=False)
 
-    def drop_log_stats(self, ignore=['IGNORED']):
+    def drop_log_stats(self, ignore=('IGNORED',)):
         """Compute the channel stats based on a drop_log from Epochs.
 
         Parameters
@@ -1023,7 +1045,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         return _drop_log_stats(self.drop_log, ignore)
 
     def plot_drop_log(self, threshold=0, n_max_plot=20, subject='Unknown',
-                      color=(0.9, 0.9, 0.9), width=0.8, ignore=['IGNORED'],
+                      color=(0.9, 0.9, 0.9), width=0.8, ignore=('IGNORED',),
                       show=True):
         """Show the channel stats based on a drop_log from Epochs
 
@@ -1145,6 +1167,8 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         else:
             # we start out with an empty array, allocate only if necessary
             data = np.empty((0, len(self.info['ch_names']), len(self.times)))
+            logger.info('Loading data for %s events and %s original time '
+                        'points ...' % (n_events, len(self._raw_times)))
         if self._bad_dropped:
             if not out:
                 return
@@ -1395,18 +1419,18 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         if tmin is None:
             tmin = self.tmin
         elif tmin < self.tmin:
-            warnings.warn("tmin is not in epochs' time interval."
-                          "tmin is set to epochs.tmin")
+            warn('tmin is not in epochs time interval. tmin is set to '
+                 'epochs.tmin')
             tmin = self.tmin
 
         if tmax is None:
             tmax = self.tmax
         elif tmax > self.tmax:
-            warnings.warn("tmax is not in epochs' time interval."
-                          "tmax is set to epochs.tmax")
+            warn('tmax is not in epochs time interval. tmax is set to '
+                 'epochs.tmax')
             tmax = self.tmax
 
-        tmask = _time_mask(self.times, tmin, tmax)
+        tmask = _time_mask(self.times, tmin, tmax, sfreq=self.info['sfreq'])
         this_epochs = self if not copy else self.copy()
         this_epochs.times = this_epochs.times[tmask]
         this_epochs._raw_times = this_epochs._raw_times[tmask]
@@ -1414,7 +1438,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         return this_epochs
 
     @verbose
-    def resample(self, sfreq, npad=100, window='boxcar', n_jobs=1,
+    def resample(self, sfreq, npad=None, window='boxcar', n_jobs=1,
                  copy=False, verbose=None):
         """Resample preloaded data
 
@@ -1422,8 +1446,10 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         ----------
         sfreq : float
             New sample rate to use
-        npad : int
+        npad : int | str
             Amount to pad the start and end of the data.
+            Can also be "auto" to use a padding that will result in
+            a power-of-two size (can be much faster).
         window : string or tuple
             Window to use in resampling. See scipy.signal.resample.
         n_jobs : int
@@ -1448,6 +1474,11 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         # XXX this could operate on non-preloaded data, too
         if not self.preload:
             raise RuntimeError('Can only resample preloaded data')
+        if npad is None:
+            npad = 100
+            warn('npad is currently taken to be 100, but will be changed to '
+                 '"auto" in 0.12. Please set the value explicitly.',
+                 DeprecationWarning)
 
         inst = self.copy() if copy else self
 
@@ -1455,7 +1486,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         inst._data = resample(inst._data, sfreq, o_sfreq, npad,
                               n_jobs=n_jobs)
         # adjust indirectly affected variables
-        inst.info['sfreq'] = sfreq
+        inst.info['sfreq'] = float(sfreq)
         inst.times = (np.arange(inst._data.shape[2], dtype=np.float) /
                       sfreq + inst.times[0])
         return inst
@@ -1575,6 +1606,7 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
 
         # deal with hierarchical tags
         ids = epochs.event_id
+        orig_ids = list(event_ids)
         tagging = False
         if "/" in "".join(ids):
             # make string inputs a list of length 1
@@ -1592,8 +1624,11 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                          if all(id__ not in ids for id__ in id_)
                          else id_  # straight pass for non-tag inputs
                          for id_ in event_ids]
-            for id_ in event_ids:
-                if len(set([sub_id in ids for sub_id in id_])) != 1:
+            for ii, id_ in enumerate(event_ids):
+                if len(id_) == 0:
+                    raise KeyError(orig_ids[ii] + "not found in the "
+                                   "epoch object's event_id.")
+                elif len(set([sub_id in ids for sub_id in id_])) != 1:
                     err = ("Don't mix hierarchical and regular event_ids"
                            " like in \'%s\'." % ", ".join(id_))
                     raise ValueError(err)
@@ -1624,6 +1659,27 @@ class _BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         return epochs, indices
 
 
+def _drop_log_stats(drop_log, ignore=('IGNORED',)):
+    """
+    Parameters
+    ----------
+    drop_log : list of lists
+        Epoch drop log from Epochs.drop_log.
+    ignore : list
+        The drop reasons to ignore.
+
+    Returns
+    -------
+    perc : float
+        Total percentage of epochs dropped.
+    """
+    if not isinstance(drop_log, list) or not isinstance(drop_log[0], list):
+        raise ValueError('drop_log must be a list of lists')
+    perc = 100 * np.mean([len(d) > 0 for d in drop_log
+                          if not any(r in ignore for r in d)])
+    return perc
+
+
 class Epochs(_BaseEpochs):
     """Epochs extracted from a Raw instance
 
@@ -1644,9 +1700,9 @@ class Epochs(_BaseEpochs):
         and a dict is created with string integer names corresponding
         to the event id integers.
     tmin : float
-        Start time before event.
+        Start time before event. If nothing is provided, defaults to -0.2
     tmax : float
-        End time after event.
+        End time after event. If nothing is provided, defaults to 0.5
     baseline : None or tuple of length 2 (default (None, 0))
         The time interval to apply baseline correction.
         If None do not apply it. If baseline is (a, b)
@@ -1790,9 +1846,9 @@ class Epochs(_BaseEpochs):
     mne.Epochs.equalize_event_counts
     """
     @verbose
-    def __init__(self, raw, events, event_id, tmin, tmax, baseline=(None, 0),
-                 picks=None, name='Unknown', preload=False, reject=None,
-                 flat=None, proj=True, decim=1, reject_tmin=None,
+    def __init__(self, raw, events, event_id=None, tmin=-0.2, tmax=0.5,
+                 baseline=(None, 0), picks=None, name='Unknown', preload=False,
+                 reject=None, flat=None, proj=True, decim=1, reject_tmin=None,
                  reject_tmax=None, detrend=None, add_eeg_ref=True,
                  on_missing='error', verbose=None):
         if not isinstance(raw, _BaseRaw):
@@ -1843,7 +1899,7 @@ class EpochsArray(_BaseEpochs):
         If some events don't match the events of interest as specified
         by event_id, they will be marked as 'IGNORED' in the drop log.
     tmin : float
-        Start time before event.
+        Start time before event. If nothing provided, defaults to -0.2.
     event_id : int | list of int | dict | None
         The id of the event to consider. If dict,
         the keys can later be used to access associated events. Example:
@@ -1913,7 +1969,8 @@ class EpochsArray(_BaseEpochs):
         super(EpochsArray, self).__init__(info, data, events, event_id, tmin,
                                           tmax, baseline, reject=reject,
                                           flat=flat, reject_tmin=reject_tmin,
-                                          reject_tmax=reject_tmax, decim=1)
+                                          reject_tmax=reject_tmax, decim=1,
+                                          add_eeg_ref=False)
         if len(events) != in1d(self.events[:, 2],
                                list(self.event_id.values())).sum():
             raise ValueError('The events must only contain event numbers from '
@@ -2124,7 +2181,6 @@ def _is_good(e, ch_names, channel_type_idx, reject, flat, full_report=False,
             return False, bad_list
 
 
-@verbose
 def _read_one_epoch_file(f, tree, fname, preload):
     """Helper to read a single FIF file"""
 
@@ -2240,7 +2296,7 @@ def _read_one_epoch_file(f, tree, fname, preload):
 
 
 @verbose
-def read_epochs(fname, proj=True, add_eeg_ref=True, preload=True,
+def read_epochs(fname, proj=True, add_eeg_ref=False, preload=True,
                 verbose=None):
     """Read epochs from a fif file
 
@@ -2603,19 +2659,21 @@ def concatenate_epochs(epochs_list):
 
 
 @verbose
-def average_movements(epochs, pos, orig_sfreq=None, picks=None, origin='auto',
-                      weight_all=True, int_order=8, ext_order=3,
-                      ignore_ref=False, return_mapping=False, verbose=None):
+def average_movements(epochs, head_pos=None, orig_sfreq=None, picks=None,
+                      origin='auto', weight_all=True, int_order=8, ext_order=3,
+                      destination=None, ignore_ref=False, return_mapping=False,
+                      pos=None, verbose=None):
     """Average data using Maxwell filtering, transforming using head positions
 
     Parameters
     ----------
     epochs : instance of Epochs
         The epochs to operate on.
-    pos : tuple
-        Tuple of position information as ``(trans, rot, t)`` like that
-        returned by `get_chpi_positions`. The positions will be matched
-        based on the last given position before the onset of the epoch.
+    head_pos : array | tuple | None
+        The array should be of shape ``(N, 10)``, holding the position
+        parameters as returned by e.g. `read_head_pos`. For backward
+        compatibility, this can also be a tuple of ``(trans, rot t)``
+        as returned by `head_pos_to_trans_rot_t`.
     orig_sfreq : float | None
         The original sample frequency of the data (that matches the
         event sample numbers in ``epochs.events``). Can be ``None``
@@ -2639,6 +2697,17 @@ def average_movements(epochs, pos, orig_sfreq=None, picks=None, origin='auto',
         Basis regularization type, must be "in" or None.
         See :func:`mne.preprocessing.maxwell_filter` for details.
         Regularization is chosen based only on the destination position.
+    destination : str | array-like, shape (3,) | None
+        The destination location for the head. Can be ``None``, which
+        will not change the head position, or a string path to a FIF file
+        containing a MEG device<->head transformation, or a 3-element array
+        giving the coordinates to translate to (with no rotations).
+        For example, ``destination=(0, 0, 0.04)`` would translate the bases
+        as ``--trans default`` would in MaxFilter™ (i.e., to the default
+        head location).
+
+        .. versionadded:: 0.12
+
     ignore_ref : bool
         If True, do not include reference channels in compensation. This
         option should be True for KIT files, since Maxwell filtering
@@ -2656,6 +2725,7 @@ def average_movements(epochs, pos, orig_sfreq=None, picks=None, origin='auto',
     See Also
     --------
     mne.preprocessing.maxwell_filter
+    mne.chpi.read_head_pos
 
     Notes
     -----
@@ -2680,21 +2750,35 @@ def average_movements(epochs, pos, orig_sfreq=None, picks=None, origin='auto',
            of children in MEG: Quantification, effects on source
            estimation, and compensation. NeuroImage 40:541–550, 2008.
     """
-    from .preprocessing.maxwell import (_info_sss_basis, _reset_meg_bads,
+    from .preprocessing.maxwell import (_trans_sss_basis, _reset_meg_bads,
                                         _check_usable, _col_norm_pinv,
-                                        _get_n_moments, _get_mf_picks)
+                                        _get_n_moments, _get_mf_picks,
+                                        _prep_mf_coils, _check_destination,
+                                        _remove_meg_projs)
+    if pos is not None:
+        head_pos = pos
+        warn('pos has been replaced by head_pos and will be removed in 0.13',
+             DeprecationWarning)
+    if head_pos is None:
+        raise TypeError('head_pos must be provided and cannot be None')
+    from .chpi import head_pos_to_trans_rot_t
     if not isinstance(epochs, _BaseEpochs):
         raise TypeError('epochs must be an instance of Epochs, not %s'
                         % (type(epochs),))
     orig_sfreq = epochs.info['sfreq'] if orig_sfreq is None else orig_sfreq
     orig_sfreq = float(orig_sfreq)
-    trn, rot, t = pos
-    del pos
+    if isinstance(head_pos, np.ndarray):
+        head_pos = head_pos_to_trans_rot_t(head_pos)
+    trn, rot, t = head_pos
+    del head_pos
     _check_usable(epochs)
     origin = _check_origin(origin, epochs.info, 'head')
+    recon_trans = _check_destination(destination, epochs.info, True)
 
     logger.info('Aligning and averaging up to %s epochs'
                 % (len(epochs.events)))
+    if not np.array_equal(epochs.events[:, 0], np.unique(epochs.events[:, 0])):
+        raise RuntimeError('Epochs must have monotonically increasing events')
     meg_picks, _, _, good_picks, coil_scale, _ = \
         _get_mf_picks(epochs.info, int_order, ext_order, ignore_ref)
     n_channels, n_times = len(epochs.ch_names), len(epochs.times)
@@ -2703,6 +2787,8 @@ def average_movements(epochs, pos, orig_sfreq=None, picks=None, origin='auto',
     count = 0
     # keep only MEG w/bad channels marked in "info_from"
     info_from = pick_info(epochs.info, good_picks, copy=True)
+    all_coils_recon = _prep_mf_coils(epochs.info, ignore_ref=ignore_ref)
+    all_coils = _prep_mf_coils(info_from, ignore_ref=ignore_ref)
     # remove MEG bads in "to" info
     info_to = deepcopy(epochs.info)
     _reset_meg_bads(info_to)
@@ -2712,16 +2798,17 @@ def average_movements(epochs, pos, orig_sfreq=None, picks=None, origin='auto',
     S_decomp = 0.  # this will end up being a weighted average
     last_trans = None
     decomp_coil_scale = coil_scale[good_picks]
+    exp = dict(int_order=int_order, ext_order=ext_order, head_frame=True,
+               origin=origin)
     for ei, epoch in enumerate(epochs):
         event_time = epochs.events[epochs._current - 1, 0] / orig_sfreq
         use_idx = np.where(t <= event_time)[0]
         if len(use_idx) == 0:
-            raise RuntimeError('Event time %0.3f occurs before first '
-                               'position time %0.3f' % (event_time, t[0]))
-        use_idx = use_idx[-1]
-        trans = np.row_stack([np.column_stack([rot[use_idx],
-                                               trn[[use_idx]].T]),
-                              [[0., 0., 0., 1.]]])
+            trans = epochs.info['dev_head_t']['trans']
+        else:
+            use_idx = use_idx[-1]
+            trans = np.vstack([np.hstack([rot[use_idx], trn[[use_idx]].T]),
+                               [[0., 0., 0., 1.]]])
         loc_str = ', '.join('%0.1f' % tr for tr in (trans[:3, 3] * 1000))
         if last_trans is None or not np.allclose(last_trans, trans):
             logger.info('    Processing epoch %s (device location: %s mm)'
@@ -2734,9 +2821,8 @@ def average_movements(epochs, pos, orig_sfreq=None, picks=None, origin='auto',
             reuse = True
         epoch = epoch.copy()  # because we operate inplace
         if not reuse:
-            S = _info_sss_basis(info_from, trans, origin,
-                                int_order, ext_order, True,
-                                coil_scale=decomp_coil_scale)
+            S = _trans_sss_basis(exp, all_coils, trans,
+                                 coil_scale=decomp_coil_scale)
             # Get the weight from the un-regularized version
             weight = np.sqrt(np.sum(S * S))  # frobenius norm (eq. 44)
             # XXX Eventually we could do cross-talk and fine-cal here
@@ -2757,8 +2843,9 @@ def average_movements(epochs, pos, orig_sfreq=None, picks=None, origin='auto',
         S_decomp /= w_sum
         # Get recon matrix
         # (We would need to include external here for regularization to work)
-        S_recon = _info_sss_basis(epochs.info, None, origin,
-                                  int_order, 0, True)
+        exp['ext_order'] = 0
+        S_recon = _trans_sss_basis(exp, all_coils_recon, recon_trans)
+        exp['ext_order'] = ext_order
         # We could determine regularization on basis of destination basis
         # matrix, restricted to good channels, as regularizing individual
         # matrices within the loop above does not seem to work. But in
@@ -2772,7 +2859,9 @@ def average_movements(epochs, pos, orig_sfreq=None, picks=None, origin='auto',
         mapping = np.dot(S_recon, pS_ave)
         # Apply mapping
         data[meg_picks] = np.dot(mapping, data[good_picks])
+    info_to['dev_head_t'] = recon_trans  # set the reconstruction transform
     evoked = epochs._evoked_from_epoch_data(
         data, info_to, picks, count, 'average')
+    _remove_meg_projs(evoked)  # remove MEG projectors, they won't apply now
     logger.info('Created Evoked dataset from %s epochs' % (count,))
     return (evoked, mapping) if return_mapping else evoked

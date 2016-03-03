@@ -6,18 +6,17 @@
 #
 # License: BSD (3-clause)
 
-from collections import namedtuple
 from inspect import isgenerator
-import warnings
-from ..externals.six import string_types
+from collections import namedtuple
 
 import numpy as np
 from scipy import linalg, sparse
 
+from ..externals.six import string_types
 from ..source_estimate import SourceEstimate
 from ..epochs import _BaseEpochs
 from ..evoked import Evoked, EvokedArray
-from ..utils import logger, _reject_data_segments, _get_fast_dot
+from ..utils import logger, _reject_data_segments, _get_fast_dot, warn
 from ..io.pick import pick_types, pick_info
 from ..fixes import in1d
 
@@ -67,8 +66,8 @@ def linear_regression(inst, design_matrix, names=None):
                            stim=False, eog=False, ecg=False,
                            emg=False, exclude=['bads'])
         if [inst.ch_names[p] for p in picks] != inst.ch_names:
-            warnings.warn('Fitting linear model to non-data or bad '
-                          'channels. Check picking', UserWarning)
+            warn('Fitting linear model to non-data or bad channels. '
+                 'Check picking')
         msg = 'Fitting linear model to epochs'
         data = inst.get_data()
         out = EvokedArray(np.zeros(data.shape[1:]), inst.info, inst.tmin)
@@ -230,7 +229,7 @@ def linear_regression_raw(raw, events, event_id=None, tmin=-.1, tmax=1,
         Either a function which takes as its inputs the sparse predictor
         matrix X and the observation matrix Y, and returns the coefficient
         matrix b; or a string (for now, only 'pinv'), in which case the
-        solver used is dot(scipy.linalg.pinv(dot(X.T, X)), dot(X.T, Y.T)).T.
+        solver used is `dot(scipy.linalg.pinv(dot(X.T, X)), dot(X.T, Y.T)).T`.
 
     Returns
     -------
@@ -266,9 +265,20 @@ def linear_regression_raw(raw, events, event_id=None, tmin=-.1, tmax=1,
     data, times = raw[:]
     data = data[picks, ::decim]
     times = times[::decim]
+    if len(set(events[:, 0])) < len(events[:, 0]):
+        raise ValueError("`events` contains duplicate time points. Make "
+                         "sure all entries in the first column of `events` "
+                         "are unique.")
+
     events = events.copy()
     events[:, 0] -= raw.first_samp
     events[:, 0] //= decim
+    if len(set(events[:, 0])) < len(events[:, 0]):
+        raise ValueError("After decimating, `events` contains duplicate time "
+                         "points. This means some events are too closely "
+                         "spaced for the requested decimation factor. Choose "
+                         "different events, drop close events, or choose a "
+                         "different decimation factor.")
 
     conds = list(event_id)
     if covariates is not None:

@@ -14,13 +14,13 @@ from nose.tools import assert_true, assert_raises
 
 from mne import (read_source_spaces, pick_types, read_trans, read_cov,
                  make_sphere_model, create_info, setup_volume_source_space)
-from mne.chpi import (_calculate_chpi_positions, get_chpi_positions,
-                      _get_hpi_info)
+from mne.chpi import (_calculate_chpi_positions, read_head_pos,
+                      _get_hpi_info, head_pos_to_trans_rot_t)
 from mne.tests.test_chpi import _compare_positions
 from mne.datasets import testing
 from mne.simulation import simulate_sparse_stc, simulate_raw
 from mne.io import Raw, RawArray
-from mne.time_frequency import compute_raw_psd
+from mne.time_frequency import psd_welch
 from mne.utils import _TempDir, run_tests_if_main, requires_version, slow_test
 from mne.fixes import isclose
 
@@ -107,8 +107,7 @@ def test_simulate_raw_sphere():
     test_outname = op.join(tempdir, 'sim_test_raw.fif')
     raw_sim.save(test_outname)
 
-    raw_sim_loaded = Raw(test_outname, preload=True, proj=False,
-                         allow_maxshield=True)
+    raw_sim_loaded = Raw(test_outname, preload=True, proj=False)
     assert_allclose(raw_sim_loaded[:][0], raw_sim[:][0], rtol=1e-6, atol=1e-20)
     del raw_sim, raw_sim_2
     # with no cov (no noise) but with artifacts, most time periods should match
@@ -212,8 +211,7 @@ def test_simulate_raw_bem():
 @testing.requires_testing_data
 def test_simulate_raw_chpi():
     """Test simulation of raw data with cHPI"""
-    with warnings.catch_warnings(record=True):  # MaxShield
-        raw = Raw(raw_chpi_fname, allow_maxshield=True)
+    raw = Raw(raw_chpi_fname, allow_maxshield='yes')
     sphere = make_sphere_model('auto', 'auto', raw.info)
     # make sparse spherical source space
     sphere_vol = tuple(sphere['r0'] * 1000.) + (sphere.radius * 1000.,)
@@ -225,22 +223,30 @@ def test_simulate_raw_chpi():
     raw_chpi = simulate_raw(raw, stc, None, src, sphere, cov=None, chpi=True,
                             head_pos=pos_fname)
     # test cHPI indication
-    hpi_freqs, _, hpi_pick, hpi_on, _ = _get_hpi_info(raw.info)
+    hpi_freqs, _, hpi_pick, hpi_ons = _get_hpi_info(raw.info)[:4]
     assert_allclose(raw_sim[hpi_pick][0], 0.)
-    assert_allclose(raw_chpi[hpi_pick][0], hpi_on)
+    assert_allclose(raw_chpi[hpi_pick][0], hpi_ons.sum())
     # test that the cHPI signals make some reasonable values
-    psd_sim, freqs_sim = compute_raw_psd(raw_sim)
-    psd_chpi, freqs_chpi = compute_raw_psd(raw_chpi)
-    assert_array_equal(freqs_sim, freqs_chpi)
-    freq_idx = np.sort([np.argmin(np.abs(freqs_sim - f)) for f in hpi_freqs])
     picks_meg = pick_types(raw.info, meg=True, eeg=False)
     picks_eeg = pick_types(raw.info, meg=False, eeg=True)
-    assert_allclose(psd_sim[picks_eeg], psd_chpi[picks_eeg], atol=1e-20)
-    assert_true((psd_chpi[picks_meg][:, freq_idx] >
-                 100 * psd_sim[picks_meg][:, freq_idx]).all())
+
+    for picks in [picks_meg, picks_eeg]:
+        psd_sim, freqs_sim = psd_welch(raw_sim, picks=picks)
+        psd_chpi, freqs_chpi = psd_welch(raw_chpi, picks=picks)
+
+        assert_array_equal(freqs_sim, freqs_chpi)
+        freq_idx = np.sort([np.argmin(np.abs(freqs_sim - f))
+                           for f in hpi_freqs])
+        if picks is picks_meg:
+            assert_true((psd_chpi[:, freq_idx] >
+                         100 * psd_sim[:, freq_idx]).all())
+        else:
+            assert_allclose(psd_sim, psd_chpi, atol=1e-20)
+
     # test localization based on cHPI information
-    trans_sim, rot_sim, t_sim = _calculate_chpi_positions(raw_chpi)
-    trans, rot, t = get_chpi_positions(pos_fname)
+    quats_sim = _calculate_chpi_positions(raw_chpi)
+    trans_sim, rot_sim, t_sim = head_pos_to_trans_rot_t(quats_sim)
+    trans, rot, t = head_pos_to_trans_rot_t(read_head_pos(pos_fname))
     t -= raw.first_samp / raw.info['sfreq']
     _compare_positions((trans, rot, t), (trans_sim, rot_sim, t_sim),
                        max_dist=0.005)
