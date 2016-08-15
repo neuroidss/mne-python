@@ -18,7 +18,6 @@ from ..meas_info import read_meas_info
 from ..tree import dir_tree_find
 from ..tag import read_tag, read_tag_info
 from ..proj import make_eeg_average_ref_proj, _needs_eeg_average_ref_proj
-from ..compensator import get_current_comp, set_current_comp, make_compensator
 from ..base import _BaseRaw, _RawShell, _check_raw_compatibility
 from ..utils import _mult_cal_one
 
@@ -28,14 +27,13 @@ from ...utils import check_fname, logger, verbose, warn
 
 
 class Raw(_BaseRaw):
-    """Raw FIF data
+    """Raw data in FIF format
 
     Parameters
     ----------
-    fnames : list, or string
-        A list of the raw files to treat as a Raw instance, or a single
-        raw file. For files that have automatically been split, only the
-        name of the first file has to be specified. Filenames should end
+    fname : str
+        The raw file to load. For files that have automatically been split,
+        the split part will be automatically loaded. Filenames should end
         with raw.fif, raw.fif.gz, raw_sss.fif, raw_sss.fif.gz,
         raw_tsss.fif or raw_tsss.fif.gz.
     allow_maxshield : bool | str (default False)
@@ -57,12 +55,13 @@ class Raw(_BaseRaw):
         applied automatically later on (e.g. when computing inverse
         solutions).
     compensation : None | int
-        If None the compensation in the data is not modified.
-        If set to n, e.g. 3, apply gradient compensation of grade n as
-        for CTF systems.
+        Deprecated. Use :meth:`mne.io.Raw.apply_gradient_compensation`
+        instead.
     add_eeg_ref : bool
         If True, add average EEG reference projector (if it's not already
         present).
+    fnames : list or str
+        Deprecated.
     verbose : bool, str, int, or None
         If not None, override default verbose level (see mne.verbose).
 
@@ -80,12 +79,22 @@ class Raw(_BaseRaw):
         See above.
     """
     @verbose
-    def __init__(self, fnames, allow_maxshield=False, preload=False,
+    def __init__(self, fname, allow_maxshield=False, preload=False,
                  proj=False, compensation=None, add_eeg_ref=True,
-                 verbose=None):
-
+                 fnames=None, verbose=None):
+        dep = ('Supplying a list of filenames with "fnames" to the Raw class '
+               'has been deprecated and will be removed in 0.13. Use multiple '
+               'calls to read_raw_fif with the "fname" argument followed by '
+               'and concatenate_raws instead.')
+        if fnames is not None:
+            warn(dep, DeprecationWarning)
+        else:
+            fnames = fname
+        del fname
         if not isinstance(fnames, list):
             fnames = [fnames]
+        else:
+            warn(dep, DeprecationWarning)
         fnames = [op.realpath(f) for f in fnames]
         split_fnames = []
 
@@ -93,8 +102,7 @@ class Raw(_BaseRaw):
         for ii, fname in enumerate(fnames):
             do_check_fname = fname not in split_fnames
             raw, next_fname = self._read_raw_file(fname, allow_maxshield,
-                                                  preload, compensation,
-                                                  do_check_fname)
+                                                  preload, do_check_fname)
             raws.append(raw)
             if next_fname is not None:
                 if not op.exists(next_fname):
@@ -119,7 +127,6 @@ class Raw(_BaseRaw):
             copy.deepcopy(raws[0].info), False,
             [r.first_samp for r in raws], [r.last_samp for r in raws],
             [r.filename for r in raws], [r._raw_extras for r in raws],
-            copy.deepcopy(raws[0].comp), raws[0]._orig_comp_grade,
             raws[0].orig_format, None, verbose=verbose)
 
         # combine information from each raw file to construct self
@@ -140,6 +147,12 @@ class Raw(_BaseRaw):
                                                         last_samps,
                                                         first_samps,
                                                         r.info['sfreq'])
+        if compensation is not None:
+            warn('The "compensation" argument has been deprecated '
+                 'in favor of the "raw.apply_gradient_compensation" '
+                 'method and will be removed in 0.14',
+                 DeprecationWarning)
+            self.apply_gradient_compensation(compensation)
         if preload:
             self._preload_data(preload)
         else:
@@ -150,7 +163,7 @@ class Raw(_BaseRaw):
             self.apply_proj()
 
     @verbose
-    def _read_raw_file(self, fname, allow_maxshield, preload, compensation,
+    def _read_raw_file(self, fname, allow_maxshield, preload,
                        do_check_fname=True, verbose=None):
         """Read in header information from a raw file"""
         logger.info('Opening raw data file %s...' % fname)
@@ -168,6 +181,28 @@ class Raw(_BaseRaw):
             #   Read the measurement info
 
             info, meas = read_meas_info(fid, tree, clean_bads=True)
+
+            annotations = None
+            annot_data = dir_tree_find(tree, FIFF.FIFFB_MNE_ANNOTATIONS)
+            if len(annot_data) > 0:
+                annot_data = annot_data[0]
+                for k in range(annot_data['nent']):
+                    kind = annot_data['directory'][k].kind
+                    pos = annot_data['directory'][k].pos
+                    orig_time = None
+                    tag = read_tag(fid, pos)
+                    if kind == FIFF.FIFF_MNE_BASELINE_MIN:
+                        onset = tag.data
+                    elif kind == FIFF.FIFF_MNE_BASELINE_MAX:
+                        duration = tag.data - onset
+                    elif kind == FIFF.FIFF_COMMENT:
+                        description = tag.data.split(':')
+                        description = [d.replace(';', ':') for d in
+                                       description]
+                    elif kind == FIFF.FIFF_MEAS_DATE:
+                        orig_time = float(tag.data)
+                annotations = Annotations(onset, duration, description,
+                                          orig_time)
 
             #   Locate the data of interest
             raw_node = dir_tree_find(meas, FIFF.FIFFB_RAW_DATA)
@@ -211,6 +246,7 @@ class Raw(_BaseRaw):
                 tag = read_tag(fid, directory[first].pos)
                 first_samp = int(tag.data)
                 first += 1
+                _check_entry(first, nent)
 
             #   Omit initial skip
             if directory[first].kind == FIFF.FIFF_DATA_SKIP:
@@ -218,38 +254,17 @@ class Raw(_BaseRaw):
                 tag = read_tag(fid, directory[first].pos)
                 first_skip = int(tag.data)
                 first += 1
+                _check_entry(first, nent)
 
             raw = _RawShell()
             raw.filename = fname
             raw.first_samp = first_samp
+            raw.annotations = annotations
 
             #   Go through the remaining tags in the directory
             raw_extras = list()
             nskip = 0
             orig_format = None
-            annotations = None
-
-            annot_data = dir_tree_find(tree, FIFF.FIFFB_MNE_ANNOTATIONS)
-            if len(annot_data) > 0:
-                annot_data = annot_data[0]
-                for k in range(annot_data['nent']):
-                    kind = annot_data['directory'][k].kind
-                    pos = annot_data['directory'][k].pos
-                    orig_time = None
-                    tag = read_tag(fid, pos)
-                    if kind == FIFF.FIFF_MNE_BASELINE_MIN:
-                        onset = tag.data
-                    elif kind == FIFF.FIFF_MNE_BASELINE_MAX:
-                        duration = tag.data - onset
-                    elif kind == FIFF.FIFF_COMMENT:
-                        description = tag.data.split(':')
-                        description = [d.replace(';', ':') for d in
-                                       description]
-                    elif kind == FIFF.FIFF_MEAS_DATE:
-                        orig_time = float(tag.data)
-                annotations = Annotations(onset, duration, description,
-                                          orig_time)
-            raw.annotations = annotations
 
             for k in range(first, nent):
                 ent = directory[k]
@@ -323,22 +338,6 @@ class Raw(_BaseRaw):
 
         raw._cals = cals
         raw._raw_extras = raw_extras
-        raw.comp = None
-        raw._orig_comp_grade = None
-
-        #   Set up the CTF compensator
-        current_comp = get_current_comp(info)
-        if current_comp is not None:
-            logger.info('Current compensation grade : %d' % current_comp)
-
-        if compensation is not None:
-            raw.comp = make_compensator(info, current_comp, compensation)
-            if raw.comp is not None:
-                logger.info('Appropriate compensator added to change to '
-                            'grade %d.' % (compensation))
-                raw._orig_comp_grade = current_comp
-                set_current_comp(info, compensation)
-
         logger.info('    Range : %d ... %d =  %9.3f ... %9.3f secs' % (
                     raw.first_samp, raw.last_samp,
                     float(raw.first_samp) / info['sfreq'],
@@ -465,17 +464,22 @@ class Raw(_BaseRaw):
         return self
 
 
-def read_raw_fif(fnames, allow_maxshield=False, preload=False,
+def _check_entry(first, nent):
+    """Helper to sanity check entries"""
+    if first >= nent:
+        raise IOError('Could not read data, perhaps this is a corrupt file')
+
+
+def read_raw_fif(fname, allow_maxshield=False, preload=False,
                  proj=False, compensation=None, add_eeg_ref=True,
-                 verbose=None):
+                 fnames=None, verbose=None):
     """Reader function for Raw FIF data
 
     Parameters
     ----------
-    fnames : list, or string
-        A list of the raw files to treat as a Raw instance, or a single
-        raw file. For files that have automatically been split, only the
-        name of the first file has to be specified. Filenames should end
+    fname : str
+        The raw file to load. For files that have automatically been split,
+        the split part will be automatically loaded. Filenames should end
         with raw.fif, raw.fif.gz, raw_sss.fif, raw_sss.fif.gz,
         raw_tsss.fif or raw_tsss.fif.gz.
     allow_maxshield : bool, (default False)
@@ -496,12 +500,13 @@ def read_raw_fif(fnames, allow_maxshield=False, preload=False,
         applied automatically later on (e.g. when computing inverse
         solutions).
     compensation : None | int
-        If None the compensation in the data is not modified.
-        If set to n, e.g. 3, apply gradient compensation of grade n as
-        for CTF systems.
+        Deprecated. Use :meth:`mne.io.Raw.apply_gradient_compensation`
+        instead.
     add_eeg_ref : bool
         If True, add average EEG reference projector (if it's not already
         present).
+    fnames : list or str
+        Deprecated.
     verbose : bool, str, int, or None
         If not None, override default verbose level (see mne.verbose).
 
@@ -514,6 +519,6 @@ def read_raw_fif(fnames, allow_maxshield=False, preload=False,
     -----
     .. versionadded:: 0.9.0
     """
-    return Raw(fnames=fnames, allow_maxshield=allow_maxshield,
+    return Raw(fname=fname, allow_maxshield=allow_maxshield,
                preload=preload, proj=proj, compensation=compensation,
-               add_eeg_ref=add_eeg_ref, verbose=verbose)
+               add_eeg_ref=add_eeg_ref, fnames=fnames, verbose=verbose)

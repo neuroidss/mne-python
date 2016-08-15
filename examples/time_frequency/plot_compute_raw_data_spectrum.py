@@ -26,16 +26,13 @@ print(__doc__)
 # Set parameters
 data_path = sample.data_path()
 raw_fname = data_path + '/MEG/sample/sample_audvis_raw.fif'
-proj_fname = data_path + '/MEG/sample/sample_audvis_eog_proj.fif'
+proj_fname = data_path + '/MEG/sample/sample_audvis_eog-proj.fif'
 
 tmin, tmax = 0, 60  # use the first 60s of data
 
-# Setup for reading the raw data
-raw = io.Raw(raw_fname)
+# Setup for reading the raw data (to save memory, crop before loading)
+raw = io.read_raw_fif(raw_fname).crop(tmin, tmax).load_data()
 raw.info['bads'] += ['MEG 2443', 'EEG 053']  # bads + 2 more
-
-# To save memory, crop the raw data before loading data
-raw.crop(tmin, tmax, copy=False).load_data()
 
 # Add SSP projection vectors to reduce EOG and ECG artifacts
 projs = read_proj(proj_fname)
@@ -78,7 +75,7 @@ raw.plot_psd(tmin=tmin, tmax=tmax, fmin=fmin, fmax=fmax, n_fft=n_fft,
 ax.set_title('Four left-temporal magnetometers')
 plt.legend(['Without SSP', 'With SSP', 'SSP + Notch'])
 
-# Alternatively, you may also create PSDs from Raw objects with psd_XXX
+# Alternatively, you may also create PSDs from Raw objects with ``psd_*``
 f, ax = plt.subplots()
 psds, freqs = psd_multitaper(raw, low_bias=True, tmin=tmin, tmax=tmax,
                              fmin=fmin, fmax=fmax, proj=True, picks=picks,

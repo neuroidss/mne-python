@@ -739,7 +739,7 @@ def _permutation_cluster_test(X, threshold, n_permutations, tail, stat_fun,
         partitions = _get_partitions_from_connectivity(connectivity, n_times)
     else:
         partitions = None
-    logger.info('Running intial clustering')
+    logger.info('Running initial clustering')
     out = _find_clusters(T_obs, threshold, tail, connectivity,
                          max_step=max_step, include=include,
                          partitions=partitions, t_power=t_power,
@@ -1520,6 +1520,10 @@ def summarize_clusters_stc(clu, p_thresh=0.05, tstep=1e-3, tmin=0,
     Returns
     -------
     out : instance of SourceEstimate
+        A summary of the clusters. The first time point in this SourceEstimate
+        object is the summation of all the clusters. Subsequent time points
+        contain each individual cluster. The magnitude of the activity
+        corresponds to the length the cluster spans in time (in samples).
     """
     if vertices is None:
         vertices = [np.arange(10242), np.arange(10242)]

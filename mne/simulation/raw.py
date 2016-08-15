@@ -44,7 +44,10 @@ def simulate_raw(raw, stc, trans, src, bem, cov='simple',
                  blink=False, ecg=False, chpi=False, head_pos=None,
                  mindist=1.0, interp='cos2', iir_filter=None, n_jobs=1,
                  random_state=None, verbose=None):
-    """Simulate raw data with head movements
+    """Simulate raw data
+
+    Head movements can optionally be simulated using the ``head_pos``
+    parameter.
 
     Parameters
     ----------
@@ -114,6 +117,9 @@ def simulate_raw(raw, stc, trans, src, bem, cov='simple',
     See Also
     --------
     read_head_pos
+    simulate_evoked
+    simulate_stc
+    simalute_sparse_stc
 
     Notes
     -----
@@ -259,7 +265,6 @@ def simulate_raw(raw, stc, trans, src, bem, cov='simple',
     raw_data = np.zeros((len(info['ch_names']), len(times)))
 
     # figure out our cHPI, ECG, and blink dipoles
-    R, r0 = fit_sphere_to_headshape(info, units='m', verbose=False)[:2]
     ecg_rr = blink_rrs = exg_bem = hpi_rrs = None
     ecg = ecg and len(meg_picks) > 0
     chpi = chpi and len(meg_picks) > 0
@@ -271,6 +276,7 @@ def simulate_raw(raw, stc, trans, src, bem, cov='simple',
         raw_data[hpi_pick, :] = hpi_ons.sum()
         _log_ch('cHPI status bits enbled and', info, hpi_pick)
     if blink or ecg:
+        R, r0 = fit_sphere_to_headshape(info, units='m', verbose=False)[:2]
         exg_bem = make_sphere_model(r0, head_radius=R,
                                     relative_radii=(0.97, 0.98, 0.99, 1.),
                                     sigmas=(0.33, 1.0, 0.004, 0.33),

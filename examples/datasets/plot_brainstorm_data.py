@@ -24,7 +24,6 @@ import numpy as np
 
 import mne
 from mne.datasets.brainstorm import bst_raw
-from mne.io import Raw
 
 print(__doc__)
 
@@ -35,7 +34,7 @@ data_path = bst_raw.data_path()
 
 raw_fname = data_path + '/MEG/bst_raw/' + \
                         'subj001_somatosensory_20111109_01_AUX-f_raw.fif'
-raw = Raw(raw_fname, preload=True, add_eeg_ref=False)
+raw = mne.io.read_raw_fif(raw_fname, preload=True, add_eeg_ref=False)
 raw.plot()
 
 # set EOG channel
@@ -60,7 +59,7 @@ epochs = mne.Epochs(raw, events, event_id, tmin, tmax, picks=picks,
 evoked = epochs.average()
 
 # remove physiological artifacts (eyeblinks, heartbeats) using SSP on baseline
-evoked.add_proj(mne.compute_proj_evoked(evoked.crop(tmax=0, copy=True)))
+evoked.add_proj(mne.compute_proj_evoked(evoked.copy().crop(tmax=0)))
 evoked.apply_proj()
 
 # fix stim artifact

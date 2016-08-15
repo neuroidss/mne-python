@@ -70,8 +70,8 @@ class RtEpochs(_BaseEpochs):
 
             reject = dict(grad=4000e-13, # T / m (gradiometers)
                           mag=4e-12, # T (magnetometers)
-                          eeg=40e-6, # uV (EEG channels)
-                          eog=250e-6 # uV (EOG channels))
+                          eeg=40e-6, # V (EEG channels)
+                          eog=250e-6 # V (EOG channels))
 
     flat : dict | None
         Rejection parameters based on flatness of signal.
@@ -107,13 +107,12 @@ class RtEpochs(_BaseEpochs):
     find_events : dict
         The arguments to the real-time `find_events` method as a dictionary.
         If `find_events` is None, then default values are used.
-        Valid keys are 'output' | 'consecutive' | 'min_duration' | 'mask'.
         Example (also default values)::
 
             find_events = dict(output='onset', consecutive='increasing',
-                               min_duration=0, mask=0)
+                               min_duration=0, mask=0, mask_type='not_and')
 
-        See mne.find_events for detailed explanation of these options.
+        See :func:`mne.find_events` for detailed explanation of these options.
     verbose : bool, str, int, or None
         If not None, override default verbose level (see mne.verbose).
         Defaults to client.verbose.
@@ -169,7 +168,8 @@ class RtEpochs(_BaseEpochs):
         # find_events default options
         self._find_events_kwargs = dict(output='onset',
                                         consecutive='increasing',
-                                        min_duration=0, mask=0)
+                                        min_duration=0, mask=0,
+                                        mask_type='not_and')
         # update default options if dictionary is provided
         if find_events is not None:
             self._find_events_kwargs.update(find_events)

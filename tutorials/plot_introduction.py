@@ -7,11 +7,10 @@ Basic MEG and EEG data processing
 
 MNE-Python reimplements most of MNE-C's (the original MNE command line utils)
 functionality and offers transparent scripting.
-On top of that it extends MNE-C's functionality considerably (customize events,
-compute
-contrasts, group statistics, time-frequency analysis, EEG-sensor space analyses
-, etc.) It uses the same files as standard MNE unix commands:
-no need to convert your files to a new system or database.
+On top of that it extends MNE-C's functionality considerably
+(customize events, compute contrasts, group statistics, time-frequency
+analysis, EEG-sensor space analyses, etc.) It uses the same files as standard
+MNE unix commands: no need to convert your files to a new system or database.
 
 What you can do with MNE Python
 -------------------------------
@@ -20,7 +19,7 @@ What you can do with MNE Python
      *mne_browse_raw* for extended functionality (see :ref:`ch_browse`)
    - **Epoching**: Define epochs, baseline correction, handle conditions etc.
    - **Averaging** to get Evoked data
-   - **Compute SSP pojectors** to remove ECG and EOG artifacts
+   - **Compute SSP projectors** to remove ECG and EOG artifacts
    - **Compute ICA** to remove artifacts or select latent sources.
    - **Maxwell filtering** to remove environmental noise.
    - **Boundary Element Modeling**: single and three-layer BEM model
@@ -83,7 +82,7 @@ From raw data to evoked data
 Now, launch `ipython`_ (Advanced Python shell) using the QT backend which best
 supported across systems::
 
-  $ ipython --pylab -qt
+  $ ipython --matplotlib=qt
 
 First, load the mne package:
 """
@@ -104,7 +103,7 @@ mne.set_log_level('INFO')
 # You can set the default level by setting the environment variable
 # "MNE_LOGGING_LEVEL", or by having mne-python write preferences to a file:
 
-mne.set_config('MNE_LOGGING_LEVEL','WARNING')
+mne.set_config('MNE_LOGGING_LEVEL', 'WARNING', set_env=True)
 
 ##############################################################################
 # Note that the location of the mne-python preferences file (for easier manual
@@ -119,7 +118,7 @@ mne.get_config_path()
 # Access raw data
 # ^^^^^^^^^^^^^^^
 
-from mne.datasets import sample
+from mne.datasets import sample  # noqa
 data_path = sample.data_path()
 raw_fname = data_path + '/MEG/sample/sample_audvis_filt-0-40_raw.fif'
 print(raw_fname)
@@ -130,7 +129,7 @@ print(raw_fname)
 #
 # Read data from file:
 
-raw = mne.io.Raw(raw_fname)
+raw = mne.io.read_raw_fif(raw_fname)
 print(raw)
 print(raw.info)
 
@@ -171,7 +170,7 @@ print(events[:5])
 # system (e.g., a newer system that uses channel 'STI101' by default), you can
 # use the following to set the default stim channel to use for finding events:
 
-mne.set_config('MNE_STIM_CHANNEL', 'STI101')
+mne.set_config('MNE_STIM_CHANNEL', 'STI101', set_env=True)
 
 ##############################################################################
 # Events are stored as 2D numpy array where the first column is the time
@@ -209,7 +208,8 @@ grad_picks = mne.pick_types(raw.info, meg='grad', eog=True, exclude='bads')
 baseline = (None, 0)  # means from the first instant to t = 0
 
 ##############################################################################
-# Define peak-to-peak rejection parameters for gradiometers, magnetometers and EOG:
+# Define peak-to-peak rejection parameters for gradiometers, magnetometers
+# and EOG:
 
 reject = dict(grad=4000e-13, mag=4e-12, eog=150e-6)
 
@@ -233,7 +233,7 @@ print(epochs_data.shape)
 # Scipy supports read and write of matlab files. You can save your single
 # trials with:
 
-from scipy import io
+from scipy import io  # noqa
 io.savemat('epochs_data.mat', dict(epochs_data=epochs_data), oned_as='row')
 
 ##############################################################################
@@ -259,8 +259,8 @@ evoked.plot()
 #
 #   1. Extract the max value of each epoch
 
-max_in_each_epoch = [e.max() for e in epochs['aud_l']] # doctest:+ELLIPSIS
-print(max_in_each_epoch[:4]) # doctest:+ELLIPSIS
+max_in_each_epoch = [e.max() for e in epochs['aud_l']]  # doctest:+ELLIPSIS
+print(max_in_each_epoch[:4])  # doctest:+ELLIPSIS
 
 ##############################################################################
 # It is also possible to read evoked data stored in a fif file:
@@ -276,9 +276,36 @@ evoked2 = mne.read_evokeds(
     evoked_fname, condition='Right Auditory', baseline=(None, 0), proj=True)
 
 ##############################################################################
-# Compute a contrast:
+# Two evoked objects can be contrasted using :func:`mne.combine_evoked`.
+# This function can use ``weights='equal'``, which provides a simple
+# element-by-element subtraction (and sets the
+# :attr:`mne.Evoked.nave` attribute properly based on the underlying number
+# of trials) using either equivalent call:
 
-contrast = evoked1 - evoked2
+contrast = mne.combine_evoked([evoked1, evoked2], weights=[0.5, -0.5])
+contrast = mne.combine_evoked([evoked1, -evoked2], weights='equal')
+print(contrast)
+
+##############################################################################
+# To do a weighted sum based on the number of averages, which will give
+# you what you would have gotten from pooling all trials together in
+# :class:`mne.Epochs` before creating the :class:`mne.Evoked` instance,
+# you can use ``weights='nave'``:
+
+average = mne.combine_evoked([evoked1, evoked2], weights='nave')
+print(contrast)
+
+##############################################################################
+# Instead of dealing with mismatches in the number of averages, we can use
+# trial-count equalization before computing a contrast, which can have some
+# benefits in inverse imaging (note that here ``weights='nave'`` will
+# give the same result as ``weights='equal'``):
+
+epochs_eq = epochs.copy().equalize_event_counts(['aud_l', 'aud_r'])[0]
+evoked1, evoked2 = epochs_eq['aud_l'].average(), epochs_eq['aud_r'].average()
+print(evoked1)
+print(evoked2)
+contrast = mne.combine_evoked([evoked1, -evoked2], weights='equal')
 print(contrast)
 
 ##############################################################################
@@ -287,14 +314,14 @@ print(contrast)
 #
 # Define parameters:
 
-import numpy as np
+import numpy as np  # noqa
 n_cycles = 2  # number of cycles in Morlet wavelet
 freqs = np.arange(7, 30, 3)  # frequencies of interest
 
 ##############################################################################
 # Compute induced power and phase-locking values and plot gradiometers:
 
-from mne.time_frequency import tfr_morlet
+from mne.time_frequency import tfr_morlet  # noqa
 power, itc = tfr_morlet(epochs, freqs=freqs, n_cycles=n_cycles,
                         return_itc=True, decim=3, n_jobs=1)
 # power.plot()
@@ -305,7 +332,7 @@ power, itc = tfr_morlet(epochs, freqs=freqs, n_cycles=n_cycles,
 #
 # Import the required functions:
 
-from mne.minimum_norm import apply_inverse, read_inverse_operator
+from mne.minimum_norm import apply_inverse, read_inverse_operator  # noqa
 
 ##############################################################################
 # Read the inverse operator:
@@ -339,7 +366,7 @@ label = mne.read_label(fname_label)
 ##############################################################################
 # Compute inverse solution during the first 15s:
 
-from mne.minimum_norm import apply_inverse_raw
+from mne.minimum_norm import apply_inverse_raw  # noqa
 start, stop = raw.time_as_index([0, 15])  # read the first 15s of data
 stc = apply_inverse_raw(raw, inverse_operator, lambda2, method, label,
                         start, stop)

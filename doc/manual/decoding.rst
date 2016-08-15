@@ -1,8 +1,9 @@
-.. _decoding:
 
 .. contents:: Contents
    :local:
    :depth: 3
+
+.. _decoding:
 
 Decoding
 ########
@@ -25,6 +26,10 @@ EpochsVectorizer
 Scikit-learn API enforces the requirement that data arrays must be 2D. A common strategy for sensor-space decoding is to tile the sensors into a single vector. This can be achieved using the function :func:`mne.decoding.EpochsVectorizer.transform`. 
 
 To recover the original 3D data, an ``inverse_transform`` can be used. The ``epochs_vectorizer`` is particularly useful when constructing a pipeline object (used mainly for parameter search and cross validation). The ``epochs_vectorizer`` is the first estimator in the pipeline enabling estimators downstream to be more advanced estimators implemented in Scikit-learn. 
+
+Vectorizer
+^^^^^^^^^^
+Scikit-learn API provides functionality to chain transformers and estimators by using :class:`sklearn.pipeline.Pipeline`. We can construct decoding pipelines and perform cross-validation and grid-search. However scikit-learn transformers and estimators generally expect 2D data (n_samples * n_features), whereas MNE transformers typically output data with a higher dimensionality (e.g. n_samples * n_channels * n_frequencies * n_times). A Vectorizer therefore needs to be applied between the MNE and the scikit-learn steps: e.g: make_pipeline(Xdawn(), Vectorizer(), LogisticRegression())
 
 PSDEstimator
 ^^^^^^^^^^^^

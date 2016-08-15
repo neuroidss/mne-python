@@ -180,12 +180,14 @@ def _compute_exg_proj(mode, raw, raw_event, tmin, tmax,
     picks = pick_types(my_info, meg=True, eeg=True, eog=True, ref_meg=False,
                        exclude='bads')
     raw.filter(l_freq, h_freq, picks=picks, filter_length=filter_length,
-               n_jobs=n_jobs, method=filter_method, iir_params=iir_params)
+               n_jobs=n_jobs, method=filter_method, iir_params=iir_params,
+               l_trans_bandwidth=0.5, h_trans_bandwidth=0.5,
+               phase='zero-double')
 
     epochs = Epochs(raw, events, None, tmin, tmax, baseline=None, preload=True,
                     picks=picks, reject=reject, flat=flat, proj=True)
 
-    epochs.drop_bad_epochs()
+    epochs.drop_bad()
     if epochs.events.shape[0] < 1:
         warn('No good epochs found, returning None for projs')
         return None, events

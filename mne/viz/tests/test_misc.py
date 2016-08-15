@@ -29,6 +29,7 @@ warnings.simplefilter('always')  # enable b/c these tests throw warnings
 
 data_path = testing.data_path(download=False)
 subjects_dir = op.join(data_path, 'subjects')
+src_fname = op.join(subjects_dir, 'sample', 'bem', 'sample-oct-6-src.fif')
 inv_fname = op.join(data_path, 'MEG', 'sample',
                     'sample_audvis_trunc-meg-eeg-oct-4-meg-inv.fif')
 evoked_fname = op.join(data_path, 'MEG', 'sample', 'sample_audvis-ave.fif')
@@ -41,7 +42,7 @@ event_fname = op.join(base_dir, 'test-eve.fif')
 
 
 def _get_raw():
-    return io.Raw(raw_fname, preload=True)
+    return io.read_raw_fif(raw_fname, preload=True)
 
 
 def _get_events():
@@ -53,7 +54,8 @@ def test_plot_cov():
     """
     raw = _get_raw()
     cov = read_cov(cov_fname)
-    fig1, fig2 = cov.plot(raw.info, proj=True, exclude=raw.ch_names[6:])
+    with warnings.catch_warnings(record=True):  # bad proj
+        fig1, fig2 = cov.plot(raw.info, proj=True, exclude=raw.ch_names[6:])
 
 
 @testing.requires_testing_data
@@ -67,6 +69,11 @@ def test_plot_bem():
                   subjects_dir=subjects_dir, orientation='bad-ori')
     plot_bem(subject='sample', subjects_dir=subjects_dir,
              orientation='sagittal', slices=[25, 50])
+    plot_bem(subject='sample', subjects_dir=subjects_dir,
+             orientation='coronal', slices=[25, 50],
+             brain_surfaces='white')
+    plot_bem(subject='sample', subjects_dir=subjects_dir,
+             orientation='coronal', slices=[25, 50], src=src_fname)
 
 
 def test_plot_events():

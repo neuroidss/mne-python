@@ -164,6 +164,7 @@ FIFF.FIFFV_NEXT_NONE   = -1
 #
 # Channel types
 #
+FIFF.FIFFV_BIO_CH       = 102
 FIFF.FIFFV_MEG_CH       =   1
 FIFF.FIFFV_REF_MEG_CH   = 301
 FIFF.FIFFV_EEG_CH       =   2
@@ -176,6 +177,7 @@ FIFF.FIFFV_MISC_CH      = 502
 FIFF.FIFFV_RESP_CH      = 602  # Respiration monitoring
 FIFF.FIFFV_SEEG_CH      = 802  # stereotactic EEG
 FIFF.FIFFV_SYST_CH      = 900  # some system status information (on Triux systems only)
+FIFF.FIFFV_ECOG_CH      = 902
 FIFF.FIFFV_IAS_CH       = 910  # Internal Active Shielding data (maybe on Triux only)
 FIFF.FIFFV_EXCI_CH      = 920  # flux excitation channel used to be a stimulus channel
 FIFF.FIFFV_DIPOLE_WAVE  = 1000  # Dipole time curve (xplotter/xfit)
@@ -229,6 +231,13 @@ FIFF.FIFF_SUBJ_WEIGHT       = 407  # Weight of the subject
 FIFF.FIFF_SUBJ_HEIGHT       = 408  # Height of the subject
 FIFF.FIFF_SUBJ_COMMENT      = 409  # Comment about the subject
 FIFF.FIFF_SUBJ_HIS_ID       = 410  # ID used in the Hospital Information System
+
+FIFF.FIFFV_SUBJ_HAND_RIGHT  = 1    # Righthanded
+FIFF.FIFFV_SUBJ_HAND_LEFT   = 2    # Lefthanded
+
+FIFF.FIFFV_SUBJ_SEX_UNKNOWN = 0    # Unknown gender
+FIFF.FIFFV_SUBJ_SEX_MALE    = 1    # Male
+FIFF.FIFFV_SUBJ_SEX_FEMALE  = 2    # Female
 
 FIFF.FIFF_PROJ_ID           = 500
 FIFF.FIFF_PROJ_NAME         = 501
@@ -527,6 +536,10 @@ FIFF.FIFF_MNE_ICA_MATRIX            = 3607     # ICA unmixing matrix
 FIFF.FIFF_MNE_ICA_BADS              = 3608     # ICA bad sources
 FIFF.FIFF_MNE_ICA_MISC_PARAMS       = 3609     # ICA misc params
 #
+# Miscellaneous
+#
+FIFF.FIFF_MNE_KIT_SYSTEM_ID         = 3612     # Unique ID assigned to KIT systems
+#
 # Maxfilter tags
 #
 FIFF.FIFF_SSS_FRAME                 = 263
@@ -710,40 +723,40 @@ FIFF.FIFF_UNIT_NONE = -1
 #
 # SI base units
 #
-FIFF.FIFF_UNIT_M   = 1
-FIFF.FIFF_UNIT_KG  = 2
-FIFF.FIFF_UNIT_SEC = 3
-FIFF.FIFF_UNIT_A   = 4
-FIFF.FIFF_UNIT_K   = 5
-FIFF.FIFF_UNIT_MOL = 6
+FIFF.FIFF_UNIT_M   = 1  # meter
+FIFF.FIFF_UNIT_KG  = 2  # kilogram
+FIFF.FIFF_UNIT_SEC = 3  # second
+FIFF.FIFF_UNIT_A   = 4  # ampere
+FIFF.FIFF_UNIT_K   = 5  # Kelvin
+FIFF.FIFF_UNIT_MOL = 6  # mole
 #
 # SI Supplementary units
 #
-FIFF.FIFF_UNIT_RAD = 7
-FIFF.FIFF_UNIT_SR  = 8
+FIFF.FIFF_UNIT_RAD = 7  # radian
+FIFF.FIFF_UNIT_SR  = 8  # steradian
 #
 # SI base candela
 #
-FIFF.FIFF_UNIT_CD  = 9
+FIFF.FIFF_UNIT_CD  = 9  # candela
 #
 # SI derived units
 #
-FIFF.FIFF_UNIT_HZ  = 101
-FIFF.FIFF_UNIT_N   = 102
-FIFF.FIFF_UNIT_PA  = 103
-FIFF.FIFF_UNIT_J   = 104
-FIFF.FIFF_UNIT_W   = 105
-FIFF.FIFF_UNIT_C   = 106
-FIFF.FIFF_UNIT_V   = 107
-FIFF.FIFF_UNIT_F   = 108
-FIFF.FIFF_UNIT_OHM = 109
-FIFF.FIFF_UNIT_MHO = 110
-FIFF.FIFF_UNIT_WB  = 111
-FIFF.FIFF_UNIT_T   = 112
-FIFF.FIFF_UNIT_H   = 113
-FIFF.FIFF_UNIT_CEL = 114
-FIFF.FIFF_UNIT_LM  = 115
-FIFF.FIFF_UNIT_LX  = 116
+FIFF.FIFF_UNIT_HZ  = 101  # hertz
+FIFF.FIFF_UNIT_N   = 102  # Newton
+FIFF.FIFF_UNIT_PA  = 103  # pascal
+FIFF.FIFF_UNIT_J   = 104  # joule
+FIFF.FIFF_UNIT_W   = 105  # watt
+FIFF.FIFF_UNIT_C   = 106  # coulomb
+FIFF.FIFF_UNIT_V   = 107  # volt
+FIFF.FIFF_UNIT_F   = 108  # farad
+FIFF.FIFF_UNIT_OHM = 109  # ohm
+FIFF.FIFF_UNIT_MHO = 110  # one per ohm
+FIFF.FIFF_UNIT_WB  = 111  # weber
+FIFF.FIFF_UNIT_T   = 112  # tesla
+FIFF.FIFF_UNIT_H   = 113  # Henry
+FIFF.FIFF_UNIT_CEL = 114  # celcius
+FIFF.FIFF_UNIT_LM  = 115  # lumen
+FIFF.FIFF_UNIT_LX  = 116  # lux
 #
 # Others we need
 #

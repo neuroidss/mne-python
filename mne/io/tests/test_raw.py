@@ -75,6 +75,8 @@ def _test_raw_reader(reader, test_preloading=True, **kwargs):
     assert_true(not math.isnan(raw.info['highpass']))
     assert_true(not math.isnan(raw.info['lowpass']))
 
+    assert_equal(raw3.info['kit_system_id'], raw.info['kit_system_id'])
+
     # Make sure concatenation works
     first_samp = raw.first_samp
     last_samp = raw.last_samp
@@ -105,10 +107,10 @@ def _test_concat(reader, *args):
             for last_preload in (True, False):
                 t_crops = raw.times[np.argmin(np.abs(raw.times - 0.5)) +
                                     [0, 1]]
-                raw1 = raw.crop(0, t_crops[0])
+                raw1 = raw.copy().crop(0, t_crops[0], copy=False)
                 if preloads[0]:
                     raw1.load_data()
-                raw2 = raw.crop(t_crops[1], None)
+                raw2 = raw.copy().crop(t_crops[1], None, copy=False)
                 if preloads[1]:
                     raw2.load_data()
                 raw1.append(raw2)

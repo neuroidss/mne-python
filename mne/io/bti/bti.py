@@ -17,9 +17,9 @@ from ...transforms import (combine_transforms, invert_transform, apply_trans,
                            Transform)
 from ..constants import FIFF
 from .. import _BaseRaw, _coil_trans_to_loc, _loc_to_coil_trans, _empty_info
-from ..utils import _mult_cal_one
+from ..utils import _mult_cal_one, read_str
 from .constants import BTI
-from .read import (read_int32, read_int16, read_str, read_float, read_double,
+from .read import (read_int32, read_int16, read_float, read_double,
                    read_transform, read_char, read_int64, read_uint16,
                    read_uint32, read_double_matrix, read_float_matrix,
                    read_int16_matrix)
@@ -796,7 +796,7 @@ def _read_ch_config(fid):
         chan['transform'] = read_transform(fid)
         chan['reserved'] = read_char(fid, BTI.FILE_CONF_CH_RESERVED)
 
-    elif ch_type in [BTI.CHTYPE_TRIGGER,  BTI.CHTYPE_EXTERNAL,
+    elif ch_type in [BTI.CHTYPE_TRIGGER, BTI.CHTYPE_EXTERNAL,
                      BTI.CHTYPE_UTILITY, BTI.CHTYPE_DERIVED]:
         chan['user_space_size'] = read_int32(fid)
         if ch_type == BTI.CHTYPE_TRIGGER:
@@ -1169,7 +1169,17 @@ def _get_bti_info(pdf_fname, config_fname, head_shape_fname, rotation_x,
     info['lowpass'] = lp
     chs = []
 
-    bti_ch_names = [ch['name'] for ch in bti_info['chs']]
+    # Note that 'name' and 'chan_label' are not the same.
+    # We want the configured label if out IO parsed it
+    # except for the MEG channels for which we keep the config name
+    bti_ch_names = list()
+    for ch in bti_info['chs']:
+        # we have always relied on 'A' as indicator of MEG data channels.
+        ch_name = ch['name']
+        if not ch_name.startswith('A'):
+            ch_name = ch.get('chan_label', ch_name)
+        bti_ch_names.append(ch_name)
+
     neuromag_ch_names = _rename_channels(
         bti_ch_names, ecg_ch=ecg_ch, eog_ch=eog_ch)
     ch_mapping = zip(bti_ch_names, neuromag_ch_names)
@@ -1299,6 +1309,7 @@ def _get_bti_info(pdf_fname, config_fname, head_shape_fname, rotation_x,
              'the 4D "print_table" routine.')
 
     # check that the info is complete
+    info._update_redundant()
     info._check_consistency()
     return info, bti_info
 

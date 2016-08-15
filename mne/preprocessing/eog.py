@@ -11,6 +11,7 @@ from .. import pick_types, pick_channels
 from ..utils import logger, verbose
 from ..filter import band_pass_filter
 from ..epochs import Epochs
+from ..externals.six import string_types
 
 
 @verbose
@@ -69,16 +70,19 @@ def _find_eog_events(eog, event_id, l_freq, h_freq, sampling_rate, first_samp,
 
     # filtering to remove dc offset so that we know which is blink and saccades
     fmax = np.minimum(45, sampling_rate / 2.0 - 0.75)  # protect Nyquist
-    filteog = np.array([band_pass_filter(x, sampling_rate, 2, fmax,
-                                         filter_length=filter_length)
-                        for x in eog])
+    filteog = np.array([band_pass_filter(
+        x, sampling_rate, 2, fmax, filter_length=filter_length,
+        l_trans_bandwidth=0.5, h_trans_bandwidth=0.5, phase='zero-double',
+        fir_window='hann') for x in eog])
     temp = np.sqrt(np.sum(filteog ** 2, axis=1))
 
     indexmax = np.argmax(temp)
 
     # easier to detect peaks with filtering.
-    filteog = band_pass_filter(eog[indexmax], sampling_rate, l_freq, h_freq,
-                               filter_length=filter_length)
+    filteog = band_pass_filter(
+        eog[indexmax], sampling_rate, l_freq, h_freq,
+        filter_length=filter_length, l_trans_bandwidth=0.5,
+        h_trans_bandwidth=0.5, phase='zero-double', fir_window='hann')
 
     # detecting eog blinks and generating event file
 
@@ -102,7 +106,7 @@ def _find_eog_events(eog, event_id, l_freq, h_freq, sampling_rate, first_samp,
 
 
 def _get_eog_channel_index(ch_name, inst):
-    if isinstance(ch_name, str):
+    if isinstance(ch_name, string_types):
         # Check if multiple EOG Channels
         if ',' in ch_name:
             ch_name = ch_name.split(',')
@@ -170,8 +174,8 @@ def create_eog_epochs(raw, ch_name=None, event_id=998, picks=None,
 
             reject = dict(grad=4000e-13, # T / m (gradiometers)
                           mag=4e-12, # T (magnetometers)
-                          eeg=40e-6, # uV (EEG channels)
-                          eog=250e-6 # uV (EOG channels)
+                          eeg=40e-6, # V (EEG channels)
+                          eog=250e-6 # V (EOG channels)
                           )
 
     flat : dict | None

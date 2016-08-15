@@ -8,11 +8,12 @@ from numpy.testing import assert_array_equal, assert_allclose
 
 from mne import Epochs, read_events
 from mne.io import (read_fiducials, write_fiducials, _coil_trans_to_loc,
-                    _loc_to_coil_trans, Raw, read_info, write_info)
+                    _loc_to_coil_trans, Raw, read_info, write_info,
+                    anonymize_info)
 from mne.io.constants import FIFF
 from mne.io.meas_info import (Info, create_info, _write_dig_points,
                               _read_dig_points, _make_dig_points, _merge_info,
-                              RAW_INFO_FIELDS)
+                              _force_update_info, RAW_INFO_FIELDS)
 from mne.utils import _TempDir, run_tests_if_main
 from mne.channels.montage import read_montage, read_dig_montage
 
@@ -21,7 +22,6 @@ fiducials_fname = op.join(base_dir, 'fsaverage-fiducials.fif')
 raw_fname = op.join(base_dir, 'test_raw.fif')
 chpi_fname = op.join(base_dir, 'test_chpi_raw_sss.fif')
 event_name = op.join(base_dir, 'test-eve.fif')
-evoked_nf_name = op.join(base_dir, 'test-nf-ave.fif')
 kit_data_dir = op.join(op.dirname(__file__), '..', 'kit', 'tests', 'data')
 hsp_fname = op.join(kit_data_dir, 'test_hsp.txt')
 elp_fname = op.join(kit_data_dir, 'test_elp.txt')
@@ -143,44 +143,22 @@ def test_info():
     assert_equal(info['nchan'], nchan)
     assert_equal(list(info['ch_names']), ch_names)
 
-    def _assignment_to_nchan(info):
-        info['nchan'] = 42
-    assert_raises(ValueError, _assignment_to_nchan, info)
-
-    def _assignment_to_ch_names(info):
-        info['ch_names'] = ['foo', 'bar']
-    assert_raises(ValueError, _assignment_to_ch_names, info)
-
-    def _del_nchan(info):
-        del info['nchan']
-    assert_raises(ValueError, _del_nchan, info)
-
-    def _del_ch_names(info):
-        del info['ch_names']
-    assert_raises(ValueError, _del_ch_names, info)
-
     # Deleting of regular fields should work
     info['foo'] = 'bar'
     del info['foo']
 
-    # Passing read only fields to the constructor
-    assert_raises(ValueError, Info, nchan=42)
-    assert_raises(ValueError, Info, ch_names=['foo', 'bar'])
-
-    # Test automatic updating of read-only fields
+    # Test updating of fields
     del info['chs'][-1]
+    info._update_redundant()
     assert_equal(info['nchan'], nchan - 1)
     assert_equal(list(info['ch_names']), ch_names[:-1])
 
     info['chs'][0]['ch_name'] = 'foo'
+    info._update_redundant()
     assert_equal(info['ch_names'][0], 'foo')
 
     # Test casting to and from a dict
     info_dict = dict(info)
-    info2 = Info(info_dict)
-    assert_equal(info, info2)
-
-    info_dict = info.to_dict()
     info2 = Info(info_dict)
     assert_equal(info, info2)
 
@@ -222,7 +200,7 @@ def test_io_dig_points():
     assert_raises(ValueError, _write_dig_points, dest, points[:, :2])
     assert_raises(ValueError, _write_dig_points, dest_bad, points)
     _write_dig_points(dest, points)
-    points1 = _read_dig_points(dest)
+    points1 = _read_dig_points(dest, unit='m')
     err = "Dig points diverged after writing and reading."
     assert_array_equal(points, points1, err)
 
@@ -239,7 +217,7 @@ def test_make_dig_points():
 
     info['dig'] = _make_dig_points(dig_points=dig_points)
     assert_true(info['dig'])
-    assert_array_equal(info['dig'][0]['r'], [-106.93, 99.80, 68.81])
+    assert_allclose(info['dig'][0]['r'], [-.10693, .09980, .06881])
 
     dig_points = _read_dig_points(elp_fname)
     nasion, lpa, rpa = dig_points[:3]
@@ -250,7 +228,7 @@ def test_make_dig_points():
     assert_true(info['dig'])
     idx = [d['ident'] for d in info['dig']].index(FIFF.FIFFV_POINT_NASION)
     assert_array_equal(info['dig'][idx]['r'],
-                       np.array([1.3930, 13.1613, -4.6967]))
+                       np.array([.0013930, .0131613, -.0046967]))
     assert_raises(ValueError, _make_dig_points, nasion[:2])
     assert_raises(ValueError, _make_dig_points, None, lpa[:2])
     assert_raises(ValueError, _make_dig_points, None, None, rpa[:2])
@@ -260,8 +238,8 @@ def test_make_dig_points():
                   dig_points[:, :2])
 
 
-def test_channel_name_list():
-    """Test the _ChannelNamesList object"""
+def test_redundant():
+    """Test some of the redundant properties of info"""
     # Indexing
     info = create_info(ch_names=['a', 'b', 'c'], sfreq=1000., ch_types=None)
     assert_equal(info['ch_names'][0], 'a')
@@ -279,29 +257,6 @@ def test_channel_name_list():
     # List should be read-only
     info = create_info(ch_names=['a', 'b', 'c'], sfreq=1000., ch_types=None)
 
-    def _test_assignment():
-        info['ch_names'][0] = 'foo'
-    assert_raises(RuntimeError, _test_assignment)
-
-    def _test_concatenation():
-        info['ch_names'] += ['foo']
-    assert_raises(RuntimeError, _test_concatenation)
-
-    def _test_appending():
-        info['ch_names'].append('foo')
-    assert_raises(RuntimeError, _test_appending)
-
-    def _test_removal():
-        del info['ch_names'][0]
-    assert_raises(AttributeError, _test_removal)
-
-    # Concatenation
-    assert_equal(info['ch_names'] + ['d'], ['a', 'b', 'c', 'd'])
-
-    # Representation
-    assert_equal(repr(info['ch_names']),
-                 "<ChannelNameList | 3 channels | a, b, c>")
-
 
 def test_merge_info():
     """Test merging of multiple Info objects"""
@@ -311,6 +266,26 @@ def test_merge_info():
     assert_equal(info_merged['nchan'], 6)
     assert_equal(info_merged['ch_names'], ['a', 'b', 'c', 'd', 'e', 'f'])
     assert_raises(ValueError, _merge_info, [info_a, info_a])
+
+    # Testing for force updates before merging
+    info_c = create_info(ch_names=['g', 'h', 'i'], sfreq=500., ch_types=None)
+    # This will break because sfreq is not equal
+    assert_raises(RuntimeError, _merge_info, [info_a, info_c])
+    _force_update_info(info_a, info_c)
+    assert_true(info_c['sfreq'] == info_a['sfreq'])
+    assert_true(info_c['ch_names'][0] != info_a['ch_names'][0])
+    # Make sure it works now
+    _merge_info([info_a, info_c])
+    # Check that you must supply Info
+    assert_raises(ValueError, _force_update_info, info_a,
+                  dict([('sfreq', 1000.)]))
+    # KIT System-ID
+    info_a['kit_system_id'] = 50
+    assert_equal(_merge_info((info_a, info_b))['kit_system_id'], 50)
+    info_b['kit_system_id'] = 50
+    assert_equal(_merge_info((info_a, info_b))['kit_system_id'], 50)
+    info_b['kit_system_id'] = 60
+    assert_raises(ValueError, _merge_info, (info_a, info_b))
 
 
 def test_check_consistency():
@@ -356,6 +331,47 @@ def test_check_consistency():
     info2 = info.copy()
     info2['chs'][2]['ch_name'] = 'b'
     assert_raises(RuntimeError, info2._check_consistency)
+
+
+def test_anonymize():
+    """Checks that sensitive information can be anonymized.
+    """
+    assert_raises(ValueError, anonymize_info, 'foo')
+
+    # Fake some subject data
+    raw = Raw(raw_fname)
+    raw.info['subject_info'] = dict(id=1, his_id='foobar', last_name='bar',
+                                    first_name='bar', birthday=(1987, 4, 8),
+                                    sex=0, hand=1)
+
+    orig_file_id = raw.info['file_id']['secs']
+    orig_meas_id = raw.info['meas_id']['secs']
+    # Test instance method
+    events = read_events(event_name)
+    epochs = Epochs(raw, events[:1], 2, 0., 0.1)
+    for inst in [raw, epochs]:
+        assert_true('subject_info' in inst.info.keys())
+        assert_true(inst.info['subject_info'] is not None)
+        assert_true(inst.info['file_id']['secs'] != 0)
+        assert_true(inst.info['meas_id']['secs'] != 0)
+        assert_true(np.any(inst.info['meas_date'] != [0, 0]))
+        inst.anonymize()
+        assert_true('subject_info' not in inst.info.keys())
+        assert_equal(inst.info['file_id']['secs'], 0)
+        assert_equal(inst.info['meas_id']['secs'], 0)
+        assert_equal(inst.info['meas_date'], [0, 0])
+
+    # When we write out with raw.save, these get overwritten with the
+    # new save time
+    tempdir = _TempDir()
+    out_fname = op.join(tempdir, 'test_subj_info_raw.fif')
+    raw.save(out_fname, overwrite=True)
+    raw = Raw(out_fname)
+    assert_true(raw.info.get('subject_info') is None)
+    assert_array_equal(raw.info['meas_date'], [0, 0])
+    # XXX mne.io.write.write_id necessarily writes secs
+    assert_true(raw.info['file_id']['secs'] != orig_file_id)
+    assert_true(raw.info['meas_id']['secs'] != orig_meas_id)
 
 
 run_tests_if_main()

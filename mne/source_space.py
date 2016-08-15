@@ -53,6 +53,13 @@ def _get_lut_id(lut, label, use_lut):
     return lut['id'][mask]
 
 
+_src_kind_dict = {
+    'vol': 'volume',
+    'surf': 'surface',
+    'discrete': 'discrete',
+}
+
+
 class SourceSpaces(list):
     """Represent a list of source space
 
@@ -84,24 +91,26 @@ class SourceSpaces(list):
         ss_repr = []
         for ss in self:
             ss_type = ss['type']
+            r = _src_kind_dict[ss_type]
             if ss_type == 'vol':
                 if 'seg_name' in ss:
-                    r = ("'vol' (%s), n_used=%i"
-                         % (ss['seg_name'], ss['nuse']))
+                    r += " (%s)" % (ss['seg_name'],)
                 else:
-                    r = ("'vol', shape=%s, n_used=%i"
-                         % (repr(ss['shape']), ss['nuse']))
+                    r += ", shape=%s" % (ss['shape'],)
             elif ss_type == 'surf':
-                r = "'surf', n_vertices=%i, n_used=%i" % (ss['np'], ss['nuse'])
-            else:
-                r = "%r" % ss_type
-            coord_frame = ss['coord_frame']
-            if isinstance(coord_frame, np.ndarray):
-                coord_frame = coord_frame[0]
-            r += ', coordinate_frame=%s' % _coord_frame_name(coord_frame)
+                r += (" (%s), n_vertices=%i" % (_get_hemi(ss)[0], ss['np']))
+            r += (', n_used=%i, coordinate_frame=%s'
+                  % (ss['nuse'], _coord_frame_name(int(ss['coord_frame']))))
             ss_repr.append('<%s>' % r)
-        ss_repr = ', '.join(ss_repr)
-        return "<SourceSpaces: [{ss}]>".format(ss=ss_repr)
+        return "<SourceSpaces: [%s]>" % ', '.join(ss_repr)
+
+    @property
+    def kind(self):
+        """The kind of source space (surface, volume, discrete)"""
+        ss_types = list(set([ss['type'] for ss in self]))
+        if len(ss_types) != 1:
+            return 'combined'
+        return _src_kind_dict[ss_types[0]]
 
     def __add__(self, other):
         return SourceSpaces(list.__add__(self, other))
@@ -1127,9 +1136,7 @@ def _read_talxfm(subject, subjects_dir, mode=None, verbose=None):
     if use_nibabel is True and mode == 'freesurfer':
         use_nibabel = False
     if use_nibabel:
-        import nibabel as nib
-        img = nib.load(path)
-        hdr = img.get_header()
+        hdr = _get_mri_header(path)
         # read the MRI_VOXEL to RAS transform
         n_orig = hdr.get_vox2ras()
         # read the MRI_VOXEL to MRI transform
@@ -1176,7 +1183,7 @@ def _read_talxfm(subject, subjects_dir, mode=None, verbose=None):
 def setup_source_space(subject, fname=True, spacing='oct6', surface='white',
                        overwrite=False, subjects_dir=None, add_dist=True,
                        n_jobs=1, verbose=None):
-    """Setup a source space with subsampling
+    """Setup a bilater hemisphere surface-based source space with subsampling
 
     Parameters
     ----------
@@ -1208,6 +1215,10 @@ def setup_source_space(subject, fname=True, spacing='oct6', surface='white',
     -------
     src : list
         The source space for each hemisphere.
+
+    See Also
+    --------
+    setup_volume_source_space
     """
     cmd = ('setup_source_space(%s, fname=%s, spacing=%s, surface=%s, '
            'overwrite=%s, subjects_dir=%s, add_dist=%s, verbose=%s)'
@@ -1366,7 +1377,7 @@ def setup_volume_source_space(subject, fname=None, pos=5.0, mri=None,
     surface : str | dict | None
         Define source space bounds using a FreeSurfer surface file. Can
         also be a dictionary with entries `'rr'` and `'tris'`, such as
-        those returned by `read_surface()`.
+        those returned by :func:`mne.read_surface`.
     mindist : float
         Exclude points closer than this distance (mm) to the bounding surface.
     exclude : float
@@ -1390,6 +1401,10 @@ def setup_volume_source_space(subject, fname=None, pos=5.0, mri=None,
         The source space. Note that this list will have length 1 for
         compatibility reasons, as most functions expect source spaces
         to be provided as lists).
+
+    See Also
+    --------
+    setup_source_space
 
     Notes
     -----
@@ -1809,6 +1824,16 @@ def _vol_vertex(width, height, jj, kk, pp):
     return jj + width * kk + pp * (width * height)
 
 
+def _get_mri_header(fname):
+    """Get MRI header using nibabel"""
+    import nibabel as nib
+    img = nib.load(fname)
+    try:
+        return img.header
+    except AttributeError:  # old nibabel
+        return img.get_header()
+
+
 def _get_mgz_header(fname):
     """Adapted from nibabel to quickly extract header info"""
     if not fname.endswith('.mgz'):
@@ -2030,6 +2055,14 @@ def _filter_source_spaces(surf, limit, mri_head_t, src, n_jobs=1,
             extras += [limit]
             logger.info('%d source space point%s omitted because of the '
                         '%6.1f-mm distance limit.' % tuple(extras))
+        # Adjust the patch inds as well if necessary
+        if omit + omit_outside > 0 and s.get('patch_inds') is not None:
+            if s['nearest'] is None:
+                # This shouldn't happen, but if it does, we can probably come
+                # up with a more clever solution
+                raise RuntimeError('Cannot adjust patch information properly, '
+                                   'please contact the mne-python developers')
+            _add_patch_info(s)
     logger.info('Thank you for waiting.')
 
 
@@ -2486,7 +2519,8 @@ def _get_morph_src_reordering(vertices, src_from, subject_from, subject_to,
     return data_idx, from_vertices
 
 
-def _compare_source_spaces(src0, src1, mode='exact', dist_tol=1.5e-3):
+def _compare_source_spaces(src0, src1, mode='exact', nearest=True,
+                           dist_tol=1.5e-3):
     """Compare two source spaces
 
     Note: this function is also used by forward/tests/test_make_forward.py
@@ -2525,27 +2559,29 @@ def _compare_source_spaces(src0, src1, mode='exact', dist_tol=1.5e-3):
         for name in ['seg_name']:
             if name in s0 or name in s1:
                 assert_equal(s0[name], s1[name], name)
-        if mode == 'exact':
-            for name in ['inuse', 'vertno', 'use_tris']:
-                assert_array_equal(s0[name], s1[name], err_msg=name)
-            # these fields will exist if patch info was added, these are
-            # not tested in mode == 'approx'
-            for name in ['nearest', 'nearest_dist']:
+        # these fields will exist if patch info was added
+        if nearest:
+            for name in ['nearest', 'nearest_dist', 'patch_inds']:
                 if s0[name] is None:
                     assert_true(s1[name] is None, name)
                 else:
                     assert_array_equal(s0[name], s1[name])
+            for name in ['pinfo']:
+                if s0[name] is None:
+                    assert_true(s1[name] is None, name)
+                else:
+                    assert_true(len(s0[name]) == len(s1[name]), name)
+                    for p1, p2 in zip(s0[name], s1[name]):
+                        assert_true(all(p1 == p2), name)
+        if mode == 'exact':
+            for name in ['inuse', 'vertno', 'use_tris']:
+                assert_array_equal(s0[name], s1[name], err_msg=name)
             for name in ['dist_limit']:
                 assert_true(s0[name] == s1[name], name)
             for name in ['dist']:
                 if s0[name] is not None:
                     assert_equal(s1[name].shape, s0[name].shape)
                     assert_true(len((s0['dist'] - s1['dist']).data) == 0)
-            for name in ['pinfo']:
-                if s0[name] is not None:
-                    assert_true(len(s0[name]) == len(s1[name]))
-                    for p1, p2 in zip(s0[name], s1[name]):
-                        assert_true(all(p1 == p2))
         else:  # 'approx' in mode:
             # deal with vertno, inuse, and use_tris carefully
             assert_array_equal(s0['vertno'], np.where(s0['inuse'])[0],

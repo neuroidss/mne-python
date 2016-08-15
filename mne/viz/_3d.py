@@ -12,6 +12,7 @@ from __future__ import print_function
 # License: Simplified BSD
 
 import base64
+from distutils.version import LooseVersion
 from itertools import cycle
 import os.path as op
 import warnings
@@ -20,16 +21,15 @@ import numpy as np
 from scipy import linalg
 
 from ..externals.six import string_types, advance_iterator
+from ..io import _loc_to_coil_trans, Info
 from ..io.pick import pick_types
 from ..io.constants import FIFF
 from ..surface import (get_head_surf, get_meg_helmet_surf, read_surface,
                        transform_surface_to)
 from ..transforms import (read_trans, _find_trans, apply_trans,
                           combine_transforms, _get_trans, _ensure_trans,
-                          invert_transform)
+                          invert_transform, Transform)
 from ..utils import get_subjects_dir, logger, _check_subject, verbose, warn
-from ..fixes import _get_args
-from ..defaults import _handle_default
 from .utils import mne_analyze_colormap, _prepare_trellis, COLORS, plt_show
 from ..externals.six import BytesIO
 
@@ -268,16 +268,18 @@ def _plot_mri_contours(mri_fname, surf_fnames, orientation='coronal',
 @verbose
 def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
                ch_type=None, source=('bem', 'head'), coord_frame='head',
-               meg_sensors=False, dig=False, verbose=None):
+               meg_sensors=False, eeg_sensors=True, dig=False, ref_meg=False,
+               verbose=None):
     """Plot MEG/EEG head surface and helmet in 3D.
 
     Parameters
     ----------
     info : dict
         The measurement info.
-    trans : str | 'auto' | dict
+    trans : str | 'auto' | dict | None
         The full path to the head<->MRI transform ``*-trans.fif`` file
-        produced during coregistration.
+        produced during coregistration. If trans is None, no head
+        surface will be shown.
     subject : str | None
         The subject name corresponding to FreeSurfer environment
         variable SUBJECT.
@@ -297,8 +299,12 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
         Coordinate frame to use, 'head', 'meg', or 'mri'.
     meg_sensors : bool
         If True, plot MEG sensors as points in addition to showing the helmet.
+    eeg_sensors : bool
+        If True, plot EEG sensors as points.
     dig : bool
         If True, plot the digitization points.
+    ref_meg : bool
+        If True (default False), include reference MEG sensors.
     verbose : bool, str, int, or None
         If not None, override default verbose level (see mne.verbose).
 
@@ -307,26 +313,40 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
     fig : instance of mlab.Figure
         The mayavi figure.
     """
+    from ..forward import _create_meg_coils
+    if not isinstance(info, Info):
+        raise TypeError('info must be an instance of Info, got %s'
+                        % type(info))
     if coord_frame not in ['head', 'meg', 'mri']:
         raise ValueError('coord_frame must be "head" or "meg"')
     if ch_type not in [None, 'eeg', 'meg']:
         raise ValueError('Argument ch_type must be None | eeg | meg. Got %s.'
                          % ch_type)
 
+    show_head = (subject is not None)
     if isinstance(trans, string_types):
         if trans == 'auto':
             # let's try to do this in MRI coordinates so they're easy to plot
+            subjects_dir = get_subjects_dir(subjects_dir, raise_error=True)
             trans = _find_trans(subject, subjects_dir)
         trans = read_trans(trans)
+    elif trans is None:
+        trans = Transform('head', 'mri', np.eye(4))
+        show_head = False
     elif not isinstance(trans, dict):
-        raise TypeError('trans must be str or dict')
+        raise TypeError('trans must be str, dict, or None')
     head_mri_t = _ensure_trans(trans, 'head', 'mri')
     del trans
 
     # both the head and helmet will be in MRI coordinates after this
-    surfs = [get_head_surf(subject, source=source, subjects_dir=subjects_dir)]
-    if ch_type is None or ch_type == 'meg':
-        surfs.append(get_meg_helmet_surf(info, head_mri_t))
+    meg_picks = pick_types(info, meg=True, ref_meg=ref_meg)
+    surfs = dict()
+    if show_head:
+        subjects_dir = get_subjects_dir(subjects_dir, raise_error=True)
+        surfs['head'] = get_head_surf(subject, source=source,
+                                      subjects_dir=subjects_dir)
+    if (ch_type is None and len(meg_picks) > 0) or ch_type == 'meg':
+        surfs['helmet'] = get_meg_helmet_surf(info, head_mri_t)
     if coord_frame == 'meg':
         surf_trans = combine_transforms(info['dev_head_t'], head_mri_t,
                                         'meg', 'mri')
@@ -334,15 +354,17 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
         surf_trans = head_mri_t
     else:  # coord_frame == 'mri'
         surf_trans = None
-    surfs = [transform_surface_to(surf, coord_frame, surf_trans)
-             for surf in surfs]
+    for key in surfs.keys():
+        surfs[key] = transform_surface_to(surfs[key], coord_frame, surf_trans)
     del surf_trans
 
     # determine points
-    meg_loc = list()
+    meg_rrs, meg_tris = list(), list()
+    hpi_loc = list()
     ext_loc = list()
     car_loc = list()
-    if ch_type is None or ch_type == 'eeg':
+    eeg_loc = list()
+    if eeg_sensors and (ch_type is None or ch_type == 'eeg'):
         eeg_loc = np.array([info['chs'][k]['loc'][:3]
                            for k in pick_types(info, meg=False, eeg=True)])
         if len(eeg_loc) > 0:
@@ -351,7 +373,7 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
                 eeg_loc = apply_trans(invert_transform(info['dev_head_t']),
                                       eeg_loc)
             elif coord_frame == 'mri':
-                eeg_loc = apply_trans(invert_transform(head_mri_t), eeg_loc)
+                eeg_loc = apply_trans(head_mri_t, eeg_loc)
         else:
             # only warn if EEG explicitly requested, or EEG channels exist but
             # no locations are provided
@@ -360,28 +382,45 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
                 warn('EEG electrode locations not found. Cannot plot EEG '
                      'electrodes.')
     if meg_sensors:
-        meg_loc = np.array([info['chs'][k]['loc'][:3]
-                           for k in pick_types(info)])
-        if len(meg_loc) > 0:
-            # Transform MEG coordinates from meg if necessary
-            if coord_frame == 'head':
-                meg_loc = apply_trans(info['dev_head_t'], meg_loc)
-            elif coord_frame == 'mri':
-                t = combine_transforms(info['dev_head_t'], head_mri_t,
+        coil_transs = [_loc_to_coil_trans(info['chs'][pick]['loc'])
+                       for pick in meg_picks]
+        # Transform MEG coordinates from meg if necessary
+        trans = None
+        if coord_frame == 'head':
+            trans = info['dev_head_t']
+        elif coord_frame == 'mri':
+            trans = combine_transforms(info['dev_head_t'], head_mri_t,
                                        'meg', 'mri')
-                meg_loc = apply_trans(t, meg_loc)
-        else:
+        coils = _create_meg_coils([info['chs'][pick] for pick in meg_picks],
+                                  acc='normal')
+        offset = 0
+        for coil, coil_trans in zip(coils, coil_transs):
+            rrs, tris = _sensor_shape(coil)
+            rrs = apply_trans(coil_trans, rrs)
+            if trans is not None:
+                rrs = apply_trans(trans, rrs)
+            meg_rrs.append(rrs)
+            meg_tris.append(tris + offset)
+            offset += len(meg_rrs[-1])
+        if len(meg_rrs) == 0:
             warn('MEG electrodes not found. Cannot plot MEG locations.')
+        else:
+            meg_rrs = np.concatenate(meg_rrs, axis=0)
+            meg_tris = np.concatenate(meg_tris, axis=0)
     if dig:
+        hpi_loc = np.array([d['r'] for d in info['dig']
+                            if d['kind'] == FIFF.FIFFV_POINT_HPI])
         ext_loc = np.array([d['r'] for d in info['dig']
                            if d['kind'] == FIFF.FIFFV_POINT_EXTRA])
         car_loc = np.array([d['r'] for d in info['dig']
                             if d['kind'] == FIFF.FIFFV_POINT_CARDINAL])
         if coord_frame == 'meg':
             t = invert_transform(info['dev_head_t'])
+            hpi_loc = apply_trans(t, hpi_loc)
             ext_loc = apply_trans(t, ext_loc)
             car_loc = apply_trans(t, car_loc)
         elif coord_frame == 'mri':
+            hpi_loc = apply_trans(head_mri_t, hpi_loc)
             ext_loc = apply_trans(head_mri_t, ext_loc)
             car_loc = apply_trans(head_mri_t, car_loc)
         if len(car_loc) == len(ext_loc) == 0:
@@ -391,9 +430,9 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
     from mayavi import mlab
     fig = mlab.figure(bgcolor=(0.0, 0.0, 0.0), size=(600, 600))
 
-    alphas = [1.0, 0.5]  # head, helmet
-    colors = [(0.6, 0.6, 0.6), (0.0, 0.0, 0.6)]
-    for surf, alpha, color in zip(surfs, alphas, colors):
+    alphas = dict(head=1.0, helmet=0.5)
+    colors = dict(head=(0.6, 0.6, 0.6), helmet=(0.0, 0.0, 0.6))
+    for key, surf in surfs.items():
         x, y, z = surf['rr'].T
         nn = surf['nn']
         # make absolutely sure these are normalized for Mayavi
@@ -404,19 +443,84 @@ def plot_trans(info, trans='auto', subject=None, subjects_dir=None,
             mesh = mlab.pipeline.triangular_mesh_source(x, y, z, surf['tris'])
         mesh.data.point_data.normals = nn
         mesh.data.cell_data.normals = None
-        mlab.pipeline.surface(mesh, color=color, opacity=alpha)
+        mlab.pipeline.surface(mesh, color=colors[key], opacity=alphas[key])
 
-    datas = (eeg_loc, meg_loc, car_loc, ext_loc)
-    colors = ((1., 0., 0.), (0., 0.25, 0.5), (1., 1., 0.), (1., 0.5, 0.))
-    alphas = (1.0, 0.25, 0.5, 0.25)
-    scales = (0.005, 0.0025, 0.015, 0.0075)
+    datas = (eeg_loc, hpi_loc, car_loc, ext_loc)
+    colors = ((1., 0., 0.), (0., 1., 0.), (1., 1., 0.), (1., 0.5, 0.))
+    alphas = (1.0, 0.5, 0.5, 0.25)
+    scales = (0.005, 0.015, 0.015, 0.0075)
     for data, color, alpha, scale in zip(datas, colors, alphas, scales):
         if len(data) > 0:
             with warnings.catch_warnings(record=True):  # traits
                 mlab.points3d(data[:, 0], data[:, 1], data[:, 2],
                               color=color, scale_factor=scale, opacity=alpha)
+    if len(meg_rrs) > 0:
+        color, alpha = (0., 0.25, 0.5), 0.25
+        mlab.triangular_mesh(meg_rrs[:, 0], meg_rrs[:, 1], meg_rrs[:, 2],
+                             meg_tris, color=color, opacity=alpha)
     mlab.view(90, 90)
     return fig
+
+
+def _make_tris_fan(n_vert):
+    """Helper to make tris given a number of vertices of a circle-like obj"""
+    tris = np.zeros((n_vert - 2, 3), int)
+    tris[:, 2] = np.arange(2, n_vert)
+    tris[:, 1] = tris[:, 2] - 1
+    return tris
+
+
+def _sensor_shape(coil):
+    """Get the sensor shape vertices"""
+    rrs = np.empty([0, 2])
+    tris = np.empty([0, 3], int)
+    id_ = coil['type'] & 0xFFFF
+    if id_ in (2, 3012, 3013, 3011):
+        # square figure eight
+        # wound by right hand rule such that +x side is "up" (+z)
+        long_side = coil['size']  # length of long side (meters)
+        offset = 0.0025  # offset of the center portion of planar grad coil
+        rrs = np.array([
+            [offset, -long_side / 2.],
+            [long_side / 2., -long_side / 2.],
+            [long_side / 2., long_side / 2.],
+            [offset, long_side / 2.],
+            [-offset, -long_side / 2.],
+            [-long_side / 2., -long_side / 2.],
+            [-long_side / 2., long_side / 2.],
+            [-offset, long_side / 2.]])
+        tris = np.concatenate((_make_tris_fan(4),
+                               _make_tris_fan(4) + 4), axis=0)
+    elif id_ in (2000, 3022, 3023, 3024):
+        # square magnetometer (potentially point-type)
+        size = 0.001 if id_ == 2000 else (coil['size'] / 2.)
+        rrs = np.array([[-1., 1.], [1., 1.], [1., -1.], [-1., -1.]]) * size
+        tris = _make_tris_fan(4)
+    elif id_ in (4001, 4003, 5002, 7002, 7003):
+        # round magnetometer
+        n_pts = 15  # number of points for circle
+        circle = np.exp(2j * np.pi * np.arange(n_pts) / float(n_pts))
+        circle = np.concatenate(([0.], circle))
+        circle *= coil['size'] / 2.  # radius of coil
+        rrs = np.array([circle.real, circle.imag]).T
+        tris = _make_tris_fan(n_pts + 1)
+    elif id_ in (4002, 5001, 5003, 5004, 4004, 4005, 6001, 7001):
+        # round coil 1st order (off-diagonal) gradiometer
+        baseline = coil['base'] if id_ in (5004, 4005) else 0.
+        n_pts = 16  # number of points for circle
+        # This time, go all the way around circle to close it fully
+        circle = np.exp(2j * np.pi * np.arange(-1, n_pts) / float(n_pts - 1))
+        circle[0] = 0  # center pt for triangulation
+        circle *= coil['size'] / 2.
+        rrs = np.array([  # first, second coil
+            np.concatenate([circle.real + baseline / 2.,
+                            circle.real - baseline / 2.]),
+            np.concatenate([circle.imag, -circle.imag])]).T
+        tris = np.concatenate([_make_tris_fan(n_pts + 1),
+                               _make_tris_fan(n_pts + 1) + n_pts + 1])
+    # Go from (x,y) -> (x,y,z)
+    rrs = np.pad(rrs, ((0, 0), (0, 1)), mode='constant')
+    return rrs, tris
 
 
 def _limits_to_control_points(clim, stc_data, colormap):
@@ -493,11 +597,13 @@ def _limits_to_control_points(clim, stc_data, colormap):
 
 
 def plot_source_estimates(stc, subject=None, surface='inflated', hemi='lh',
-                          colormap='auto', time_label='time=%0.2f ms',
+                          colormap='auto', time_label='auto',
                           smoothing_steps=10, transparent=None, alpha=1.0,
                           time_viewer=False, config_opts=None,
                           subjects_dir=None, figure=None, views='lat',
-                          colorbar=True, clim='auto'):
+                          colorbar=True, clim='auto', cortex="classic",
+                          size=800, background="black", foreground="white",
+                          initial_time=None, time_unit=None):
     """Plot SourceEstimates with PySurfer
 
     Note: PySurfer currently needs the SUBJECTS_DIR environment variable,
@@ -525,8 +631,10 @@ def plot_source_estimates(stc, subject=None, surface='inflated', hemi='lh',
         be (n x 3) or (n x 4) array for with RGB or RGBA values between
         0 and 255. If 'auto', either 'hot' or 'mne' will be chosen
         based on whether 'lims' or 'pos_lims' are specified in `clim`.
-    time_label : str
-        How to print info about the time instant visualized.
+    time_label : str | callable | None
+        Format of the time label (a format string, a function that maps
+        floating point time values to strings, or None for no label). The
+        default is ``time=%0.2f ms``.
     smoothing_steps : int
         The amount of smoothing
     transparent : bool | None
@@ -537,8 +645,7 @@ def plot_source_estimates(stc, subject=None, surface='inflated', hemi='lh',
     time_viewer : bool
         Display time viewer GUI.
     config_opts : dict
-        Keyword arguments for Brain initialization.
-        See pysurfer.viz.Brain.
+        Deprecated parameter.
     subjects_dir : str
         The path to the freesurfer subjects reconstructions.
         It corresponds to Freesurfer environment variable SUBJECTS_DIR.
@@ -566,20 +673,70 @@ def plot_source_estimates(stc, subject=None, surface='inflated', hemi='lh',
                 will be mirrored directly across zero during colormap
                 construction to obtain negative control points.
 
+    cortex : str or tuple
+        specifies how binarized curvature values are rendered.
+        either the name of a preset PySurfer cortex colorscheme (one of
+        'classic', 'bone', 'low_contrast', or 'high_contrast'), or the
+        name of mayavi colormap, or a tuple with values (colormap, min,
+        max, reverse) to fully specify the curvature colors.
+    size : float or pair of floats
+        The size of the window, in pixels. can be one number to specify
+        a square window, or the (width, height) of a rectangular window.
+    background : matplotlib color
+        Color of the background of the display window.
+    foreground : matplotlib color
+        Color of the foreground of the display window.
+    initial_time : float | None
+        The time to display on the plot initially. ``None`` to display the
+        first time sample (default).
+    time_unit : 's' | 'ms'
+        Whether time is represented in seconds (expected by PySurfer) or
+        milliseconds. The current default is 'ms', but will change to 's'
+        in MNE 0.14. To avoid a deprecation warning specify ``time_unit``
+        explicitly.
+
 
     Returns
     -------
     brain : Brain
         A instance of surfer.viz.Brain from PySurfer.
     """
+    import surfer
     from surfer import Brain, TimeViewer
-    config_opts = _handle_default('config_opts', config_opts)
-
     import mayavi
-    from mayavi import mlab
 
     # import here to avoid circular import problem
     from ..source_estimate import SourceEstimate
+
+    surfer_version = LooseVersion(surfer.__version__)
+    v06 = LooseVersion('0.6')
+    if surfer_version < v06:
+        raise ImportError("This function requires PySurfer 0.6 (you are "
+                          "running version %s). You can update PySurfer "
+                          "using:\n\n    $ pip install -U pysurfer" %
+                          surfer.__version__)
+
+    if initial_time is not None and surfer_version > v06:
+        kwargs = {'initial_time': initial_time}
+        initial_time = None  # don't set it twice
+    else:
+        kwargs = {}
+
+    if time_unit is None:
+        warn("The time_unit parameter default will change from 'ms' to 's' "
+             "in MNE 0.14. To avoid this warning specify the parameter "
+             "explicitly.", DeprecationWarning)
+        time_unit = 'ms'
+    elif time_unit not in ('s', 'ms'):
+        raise ValueError("time_unit needs to be 's' or 'ms', got %r" %
+                         (time_unit,))
+
+    if time_label == 'auto':
+        if time_unit == 'ms':
+            time_label = 'time=%0.2f ms'
+        else:
+            def time_label(t):
+                return 'time=%0.2f ms' % (t * 1e3)
 
     if not isinstance(stc, SourceEstimate):
         raise ValueError('stc has to be a surface source estimate')
@@ -588,23 +745,16 @@ def plot_source_estimates(stc, subject=None, surface='inflated', hemi='lh',
         raise ValueError('hemi has to be either "lh", "rh", "split", '
                          'or "both"')
 
-    n_split = 2 if hemi == 'split' else 1
-    n_views = 1 if isinstance(views, string_types) else len(views)
+    # check `figure` parameter (This will be performed by PySurfer > 0.6)
     if figure is not None:
-        # use figure with specified id or create new figure
         if isinstance(figure, int):
-            figure = mlab.figure(figure, size=(600, 600))
-        # make sure it is of the correct type
-        if not isinstance(figure, list):
+            # use figure with specified id
+            size_ = size if isinstance(size, (tuple, list)) else (size, size)
+            figure = [mayavi.mlab.figure(figure, size=size_)]
+        elif not isinstance(figure, (list, tuple)):
             figure = [figure]
         if not all(isinstance(f, mayavi.core.scene.Scene) for f in figure):
             raise TypeError('figure must be a mayavi scene or list of scenes')
-        # make sure we have the right number of figures
-        n_fig = len(figure)
-        if not n_fig == n_split * n_views:
-            raise RuntimeError('`figure` must be a list with the same '
-                               'number of elements as PySurfer plots that '
-                               'will be created (%s)' % n_split * n_views)
 
     # convert control points to locations in colormap
     ctrl_pts, colormap = _limits_to_control_points(clim, stc.data, colormap)
@@ -628,13 +778,16 @@ def plot_source_estimates(stc, subject=None, surface='inflated', hemi='lh',
         hemis = [hemi]
 
     title = subject if len(hemis) > 1 else '%s - %s' % (subject, hemis[0])
-    args = _get_args(Brain.__init__)
-    kwargs = dict(title=title, figure=figure, config_opts=config_opts,
-                  subjects_dir=subjects_dir)
-    if 'views' in args:
-        kwargs['views'] = views
     with warnings.catch_warnings(record=True):  # traits warnings
-        brain = Brain(subject, hemi, surface, **kwargs)
+        brain = Brain(subject, hemi, surface, True, title, cortex, size,
+                      background, foreground, figure, subjects_dir, views,
+                      config_opts=config_opts)
+
+    if time_unit == 's':
+        times = stc.times
+    else:  # time_unit == 'ms'
+        times = 1e3 * stc.times
+
     for hemi in hemis:
         hemi_idx = 0 if hemi == 'lh' else 1
         if hemi_idx == 0:
@@ -642,17 +795,18 @@ def plot_source_estimates(stc, subject=None, surface='inflated', hemi='lh',
         else:
             data = stc.data[len(stc.vertices[0]):]
         vertices = stc.vertices[hemi_idx]
-        time = 1e3 * stc.times
         with warnings.catch_warnings(record=True):  # traits warnings
             brain.add_data(data, colormap=colormap, vertices=vertices,
-                           smoothing_steps=smoothing_steps, time=time,
+                           smoothing_steps=smoothing_steps, time=times,
                            time_label=time_label, alpha=alpha, hemi=hemi,
-                           colorbar=colorbar)
+                           colorbar=colorbar, **kwargs)
 
         # scale colormap and set time (index) to display
         brain.scale_data_colormap(fmin=scale_pts[0], fmid=scale_pts[1],
                                   fmax=scale_pts[2], transparent=transparent)
 
+    if initial_time is not None:
+        brain.set_time(initial_time)
     if time_viewer:
         TimeViewer(brain)
     return brain

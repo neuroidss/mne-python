@@ -13,6 +13,7 @@ from mne.commands import (mne_browse_raw, mne_bti2fiff, mne_clean_eog_ecg,
                           mne_report, mne_surf2bem, mne_watershed_bem,
                           mne_compare_fiff, mne_flash_bem, mne_show_fiff,
                           mne_show_info)
+from mne import concatenate_raws
 from mne.utils import (run_tests_if_main, _TempDir, requires_mne, requires_PIL,
                        requires_mayavi, requires_tvtk, requires_freesurfer,
                        ArgvSetter, slow_test, ultra_slow_test)
@@ -67,7 +68,7 @@ def test_clean_eog_ecg():
     """Test mne clean_eog_ecg"""
     check_usage(mne_clean_eog_ecg)
     tempdir = _TempDir()
-    raw = Raw([raw_fname, raw_fname, raw_fname])
+    raw = concatenate_raws([Raw(f) for f in [raw_fname, raw_fname, raw_fname]])
     raw.info['bads'] = ['MEG 2443']
     use_fname = op.join(tempdir, op.basename(raw_fname))
     raw.save(use_fname)
@@ -122,7 +123,8 @@ def test_make_scalp_surfaces():
     surf_path_new = op.join(tempdir, 'sample', 'surf')
     os.mkdir(op.join(tempdir, 'sample'))
     os.mkdir(surf_path_new)
-    os.mkdir(op.join(tempdir, 'sample', 'bem'))
+    subj_dir = op.join(tempdir, 'sample', 'bem')
+    os.mkdir(subj_dir)
     shutil.copy(op.join(surf_path, 'lh.seghead'), surf_path_new)
 
     orig_fs = os.getenv('FREESURFER_HOME', None)
@@ -139,6 +141,8 @@ def test_make_scalp_surfaces():
             assert_raises(RuntimeError, mne_make_scalp_surfaces.run)
             os.environ['MNE_ROOT'] = orig_mne
             mne_make_scalp_surfaces.run()
+            assert_true(op.isfile(op.join(subj_dir, 'sample-head-dense.fif')))
+            assert_true(op.isfile(op.join(subj_dir, 'sample-head-medium.fif')))
             assert_raises(IOError, mne_make_scalp_surfaces.run)  # no overwrite
     finally:
         if orig_fs is not None:
@@ -211,7 +215,6 @@ def test_watershed_bem():
 
 
 @ultra_slow_test
-@requires_mne
 @requires_freesurfer
 @sample.requires_sample_data
 def test_flash_bem():

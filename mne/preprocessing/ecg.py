@@ -53,7 +53,9 @@ def qrs_detector(sfreq, ecg, thresh_value=0.6, levels=2.5, n_thresh=3,
     win_size = int(round((60.0 * sfreq) / 120.0))
 
     filtecg = band_pass_filter(ecg, sfreq, l_freq, h_freq,
-                               filter_length=filter_length)
+                               filter_length=filter_length,
+                               l_trans_bandwidth=0.5, h_trans_bandwidth=0.5,
+                               phase='zero-double', fir_window='hann')
 
     ecg_abs = np.abs(filtecg)
     init = int(sfreq)
@@ -116,7 +118,7 @@ def qrs_detector(sfreq, ecg, thresh_value=0.6, levels=2.5, n_thresh=3,
     rates = np.array([60. * len(cev) / (len(ecg) / float(sfreq))
                       for cev in clean_events])
 
-    # now find heart rates that seem reasonable (infant thru adult athlete)
+    # now find heart rates that seem reasonable (infant through adult athlete)
     idx = np.where(np.logical_and(rates <= 160., rates >= 40.))[0]
     if len(idx) > 0:
         ideal_rate = np.median(rates[idx])  # get close to the median
@@ -259,8 +261,8 @@ def create_ecg_epochs(raw, ch_name=None, event_id=999, picks=None,
 
             reject = dict(grad=4000e-13, # T / m (gradiometers)
                           mag=4e-12, # T (magnetometers)
-                          eeg=40e-6, # uV (EEG channels)
-                          eog=250e-6 # uV (EOG channels)
+                          eeg=40e-6, # V (EEG channels)
+                          eog=250e-6 # V (EOG channels)
                           )
 
     flat : dict | None
@@ -289,7 +291,7 @@ def create_ecg_epochs(raw, ch_name=None, event_id=999, picks=None,
     ecg_epochs : instance of Epochs
         Data epoched around ECG r-peaks.
     """
-    not_has_ecg = 'ecg' not in raw
+    not_has_ecg = 'ecg' not in raw and ch_name is None
     if not_has_ecg:
         ecg, times = _make_ecg(raw, None, None, verbose)
 
@@ -336,7 +338,7 @@ def _make_ecg(inst, start, stop, verbose=None):
     """Create ECG signal from cross channel average
     """
     if not any(c in inst for c in ['mag', 'grad']):
-        raise ValueError('Unable to generate artifical ECG channel')
+        raise ValueError('Unable to generate artificial ECG channel')
     for ch in ['mag', 'grad']:
         if ch in inst:
             break
@@ -347,7 +349,7 @@ def _make_ecg(inst, start, stop, verbose=None):
     if isinstance(inst, _BaseRaw):
         ecg, times = inst[picks, start:stop]
     elif isinstance(inst, _BaseEpochs):
-        ecg = np.hstack(inst.crop(start, stop, copy=True).get_data())
+        ecg = np.hstack(inst.copy().crop(start, stop).get_data())
         times = inst.times
     elif isinstance(inst, Evoked):
         ecg = inst.data

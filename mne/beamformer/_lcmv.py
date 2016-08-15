@@ -96,9 +96,8 @@ def _apply_lcmv(data, info, tmin, forward, noise_cov, data_cov, reg,
     stc : SourceEstimate | VolSourceEstimate (or list of thereof)
         Source time courses.
     """
-    is_free_ori, ch_names, proj, vertno, G = (
-        _prepare_beamformer_input(
-            info, forward, label, picks, pick_ori))
+    is_free_ori, ch_names, proj, vertno, G = \
+        _prepare_beamformer_input(info, forward, label, picks, pick_ori)
 
     # Handle whitening + data covariance
     whitener, _ = compute_whitener(noise_cov, info, picks, rank=rank)
@@ -238,8 +237,13 @@ def _prepare_beamformer_input(info, forward, label, picks, pick_ori):
                          'is used.')
 
     # Restrict forward solution to selected channels
-    ch_names = [info['chs'][k]['ch_name'] for k in picks]
-    forward = pick_channels_forward(forward, include=ch_names)
+    info_ch_names = [c['ch_name'] for c in info['chs']]
+    ch_names = [info_ch_names[k] for k in picks]
+    fwd_ch_names = forward['sol']['row_names']
+    # Keep channels in forward present in info:
+    fwd_ch_names = [c for c in fwd_ch_names if c in info_ch_names]
+    forward = pick_channels_forward(forward, fwd_ch_names)
+    picks_forward = [fwd_ch_names.index(c) for c in ch_names]
 
     # Get gain matrix (forward operator)
     if label is not None:
@@ -256,9 +260,14 @@ def _prepare_beamformer_input(info, forward, label, picks, pick_ori):
         G = forward['sol']['data']
 
     # Apply SSPs
-    proj, ncomp, _ = make_projector(info['projs'], ch_names)
+    proj, ncomp, _ = make_projector(info['projs'], fwd_ch_names)
+
     if info['projs']:
         G = np.dot(proj, G)
+
+    # Pick after applying the projections
+    G = G[picks_forward]
+    proj = proj[np.ix_(picks_forward, picks_forward)]
 
     return is_free_ori, ch_names, proj, vertno, G
 
@@ -415,7 +424,6 @@ def lcmv_epochs(epochs, forward, noise_cov, data_cov, reg=0.01, label=None,
     picks = _setup_picks(picks, info, forward, noise_cov)
 
     data = epochs.get_data()[:, picks, :]
-
     stcs = _apply_lcmv(
         data=data, info=info, tmin=tmin, forward=forward, noise_cov=noise_cov,
         data_cov=data_cov, reg=reg, label=label, picks=picks, rank=rank,
@@ -731,7 +739,7 @@ def tf_lcmv(epochs, forward, noise_covs, tmin, tmax, tstep, win_lengths,
     raw_picks = [raw.ch_names.index(c) for c in ch_names]
 
     # Make sure epochs.events contains only good events:
-    epochs.drop_bad_epochs()
+    epochs.drop_bad()
 
     # Multiplying by 1e3 to avoid numerical issues, e.g. 0.3 // 0.05 == 5
     n_time_steps = int(((tmax - tmin) * 1e3) // (tstep * 1e3))
@@ -743,7 +751,7 @@ def tf_lcmv(epochs, forward, noise_covs, tmin, tmax, tstep, win_lengths,
 
         raw_band = raw.copy()
         raw_band.filter(l_freq, h_freq, picks=raw_picks, method='iir',
-                        n_jobs=n_jobs)
+                        n_jobs=n_jobs, iir_params=dict(output='ba'))
         raw_band.info['highpass'] = l_freq
         raw_band.info['lowpass'] = h_freq
         epochs_band = Epochs(raw_band, epochs.events, epochs.event_id,

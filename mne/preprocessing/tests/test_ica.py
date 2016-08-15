@@ -9,19 +9,22 @@ import os
 import os.path as op
 import warnings
 
-from nose.tools import assert_true, assert_raises, assert_equal
+from nose.tools import assert_true, assert_raises, assert_equal, assert_false
 import numpy as np
 from numpy.testing import (assert_array_almost_equal, assert_array_equal,
                            assert_allclose)
 from scipy import stats
 from itertools import product
 
-from mne import Epochs, read_events, pick_types
+from mne import Epochs, read_events, pick_types, create_info, EpochsArray
 from mne.cov import read_cov
 from mne.preprocessing import (ICA, ica_find_ecg_events, ica_find_eog_events,
                                read_ica, run_ica)
-from mne.preprocessing.ica import get_score_funcs, corrmap
-from mne.io import Raw, Info
+from mne.preprocessing.ica import (get_score_funcs, corrmap, _get_ica_map,
+                                   _ica_explained_variance, _sort_components)
+from mne.io import Raw, Info, RawArray
+from mne.io.meas_info import _kind_dict
+from mne.io.pick import _DATA_CH_TYPES_SPLIT
 from mne.tests.common import assert_naming
 from mne.utils import (catch_logging, _TempDir, requires_sklearn, slow_test,
                        run_tests_if_main)
@@ -36,7 +39,6 @@ warnings.simplefilter('always')  # enable b/c these tests throw warnings
 data_dir = op.join(op.dirname(__file__), '..', '..', 'io', 'tests', 'data')
 raw_fname = op.join(data_dir, 'test_raw.fif')
 event_name = op.join(data_dir, 'test-eve.fif')
-evoked_nf_name = op.join(data_dir, 'test-nf-ave.fif')
 test_cov_name = op.join(data_dir, 'test-cov.fif')
 
 event_id, tmin, tmax = 1, -0.2, 0.2
@@ -54,13 +56,14 @@ except:
 def test_ica_full_data_recovery():
     """Test recovery of full data when no source is rejected"""
     # Most basic recovery
-    raw = Raw(raw_fname).crop(0.5, stop, False)
+    raw = Raw(raw_fname).crop(0.5, stop, copy=False)
     raw.load_data()
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')[:10]
-    epochs = Epochs(raw, events[:4], event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True)
+    with warnings.catch_warnings(record=True):  # bad proj
+        epochs = Epochs(raw, events[:4], event_id, tmin, tmax, picks=picks,
+                        baseline=(None, 0), preload=True)
     evoked = epochs.average()
     n_channels = 5
     data = raw._data[:n_channels].copy()
@@ -75,7 +78,7 @@ def test_ica_full_data_recovery():
                       method=method, max_iter=1)
             with warnings.catch_warnings(record=True):
                 ica.fit(raw, picks=list(range(n_channels)))
-            raw2 = ica.apply(raw, exclude=[], copy=True)
+            raw2 = ica.apply(raw.copy(), exclude=[])
             if ok:
                 assert_allclose(data[:n_channels], raw2._data[:n_channels],
                                 rtol=1e-10, atol=1e-15)
@@ -88,7 +91,7 @@ def test_ica_full_data_recovery():
                       n_pca_components=n_pca_components)
             with warnings.catch_warnings(record=True):
                 ica.fit(epochs, picks=list(range(n_channels)))
-            epochs2 = ica.apply(epochs, exclude=[], copy=True)
+            epochs2 = ica.apply(epochs.copy(), exclude=[])
             data2 = epochs2.get_data()[:, :n_channels]
             if ok:
                 assert_allclose(data_epochs[:, :n_channels], data2,
@@ -97,7 +100,7 @@ def test_ica_full_data_recovery():
                 diff = np.abs(data_epochs[:, :n_channels] - data2)
                 assert_true(np.max(diff) > 1e-14)
 
-            evoked2 = ica.apply(evoked, exclude=[], copy=True)
+            evoked2 = ica.apply(evoked.copy(), exclude=[])
             data2 = evoked2.data[:n_channels]
             if ok:
                 assert_allclose(data_evoked[:n_channels], data2,
@@ -112,7 +115,7 @@ def test_ica_full_data_recovery():
 def test_ica_rank_reduction():
     """Test recovery ICA rank reduction"""
     # Most basic recovery
-    raw = Raw(raw_fname).crop(0.5, stop, False)
+    raw = Raw(raw_fname).crop(0.5, stop, copy=False)
     raw.load_data()
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')[:10]
@@ -128,7 +131,7 @@ def test_ica_rank_reduction():
 
         rank_before = raw.estimate_rank(picks=picks)
         assert_equal(rank_before, len(picks))
-        raw_clean = ica.apply(raw, copy=True)
+        raw_clean = ica.apply(raw.copy())
         rank_after = raw_clean.estimate_rank(picks=picks)
         # interaction between ICA rejection and PCA components difficult
         # to preduct. Rank_after often seems to be 1 higher then
@@ -140,7 +143,7 @@ def test_ica_rank_reduction():
 @requires_sklearn
 def test_ica_reset():
     """Test ICA resetting"""
-    raw = Raw(raw_fname).crop(0.5, stop, False)
+    raw = Raw(raw_fname).crop(0.5, stop, copy=False)
     raw.load_data()
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')[:10]
@@ -168,7 +171,7 @@ def test_ica_reset():
 @requires_sklearn
 def test_ica_core():
     """Test ICA on raw and epochs"""
-    raw = Raw(raw_fname).crop(1.5, stop, False)
+    raw = Raw(raw_fname).crop(1.5, stop, copy=False)
     raw.load_data()
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
@@ -254,7 +257,7 @@ def test_ica_core():
     # test for bug with whitener updating
     _pre_whitener = ica._pre_whitener.copy()
     epochs._data[:, 0, 10:15] *= 1e12
-    ica.apply(epochs, copy=True)
+    ica.apply(epochs.copy())
     assert_array_equal(_pre_whitener, ica._pre_whitener)
 
     # test expl. var threshold leading to empty sel
@@ -273,10 +276,10 @@ def test_ica_additional():
     """Test additional ICA functionality"""
     tempdir = _TempDir()
     stop2 = 500
-    raw = Raw(raw_fname).crop(1.5, stop, False)
+    raw = Raw(raw_fname).crop(1.5, stop, copy=False)
     raw.load_data()
-    picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
-                       eog=False, exclude='bads')
+    # XXX This breaks the tests :(
+    # raw.info['bads'] = [raw.ch_names[1]]
     test_cov = read_cov(test_cov_name)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
@@ -312,11 +315,16 @@ def test_ica_additional():
 
     # test corrmap
     ica2 = ica.copy()
+    ica3 = ica.copy()
     corrmap([ica, ica2], (0, 0), threshold='auto', label='blinks', plot=True,
             ch_type="mag")
     corrmap([ica, ica2], (0, 0), threshold=2, plot=False, show=False)
     assert_true(ica.labels_["blinks"] == ica2.labels_["blinks"])
     assert_true(0 in ica.labels_["blinks"])
+    template = _get_ica_map(ica)[0]
+    corrmap([ica, ica3], template, threshold='auto', label='blinks', plot=True,
+            ch_type="mag")
+    assert_true(ica2.labels_["blinks"] == ica3.labels_["blinks"])
     plt.close('all')
 
     # test warnings on bad filenames
@@ -344,6 +352,15 @@ def test_ica_additional():
     with warnings.catch_warnings(record=True):
         ica.fit(raw, picks=None, decim=3)
     assert_true(ica.n_components_ == 4)
+    ica_var = _ica_explained_variance(ica, raw, normalize=True)
+    assert_true(np.all(ica_var[:-1] >= ica_var[1:]))
+
+    # test ica sorting
+    ica.exclude = [0]
+    ica.labels_ = dict(blink=[0], think=[1])
+    ica_sorted = _sort_components(ica, [3, 2, 1, 0], copy=True)
+    assert_equal(ica_sorted.exclude, [3])
+    assert_equal(ica_sorted.labels_, dict(blink=[3], think=[2]))
 
     # epochs extraction from raw fit
     assert_raises(RuntimeError, ica.get_sources, epochs)
@@ -361,7 +378,7 @@ def test_ica_additional():
         assert_true(sources.shape[1] == ica.n_components_)
 
         for exclude in [[], [0]]:
-            ica.exclude = [0]
+            ica.exclude = exclude
             ica.labels_ = {'foo': [0]}
             ica.save(test_ica_fname)
             ica_read = read_ica(test_ica_fname)
@@ -381,18 +398,24 @@ def test_ica_additional():
 
         # test filtering
         d1 = ica_raw._data[0].copy()
-        with warnings.catch_warnings(record=True):  # dB warning
-            ica_raw.filter(4, 20)
+        ica_raw.filter(4, 20, l_trans_bandwidth='auto',
+                       h_trans_bandwidth='auto', filter_length='auto',
+                       phase='zero', fir_window='hamming')
+        assert_equal(ica_raw.info['lowpass'], 20.)
+        assert_equal(ica_raw.info['highpass'], 4.)
         assert_true((d1 != ica_raw._data[0]).any())
         d1 = ica_raw._data[0].copy()
-        with warnings.catch_warnings(record=True):  # dB warning
-            ica_raw.notch_filter([10])
+        ica_raw.notch_filter([10], filter_length='auto', trans_bandwidth=10,
+                             phase='zero', fir_window='hamming')
         assert_true((d1 != ica_raw._data[0]).any())
 
         ica.n_pca_components = 2
+        ica.method = 'fake'
         ica.save(test_ica_fname)
         ica_read = read_ica(test_ica_fname)
         assert_true(ica.n_pca_components == ica_read.n_pca_components)
+        assert_equal(ica.method, ica_read.method)
+        assert_equal(ica.labels_, ica_read.labels_)
 
         # check type consistency
         attrs = ('mixing_matrix_ unmixing_matrix_ pca_components_ '
@@ -454,6 +477,11 @@ def test_ica_additional():
         assert_equal(len(scores), ica.n_components_)
         idx, scores = ica.find_bads_ecg(raw, method='correlation')
         assert_equal(len(scores), ica.n_components_)
+
+        idx, scores = ica.find_bads_eog(raw)
+        assert_equal(len(scores), ica.n_components_)
+
+        ica.labels_ = None
         idx, scores = ica.find_bads_ecg(epochs, method='ctps')
         assert_equal(len(scores), ica.n_components_)
         assert_raises(ValueError, ica.find_bads_ecg, epochs.average(),
@@ -461,8 +489,6 @@ def test_ica_additional():
         assert_raises(ValueError, ica.find_bads_ecg, raw,
                       method='crazy-coupling')
 
-        idx, scores = ica.find_bads_eog(raw)
-        assert_equal(len(scores), ica.n_components_)
         raw.info['chs'][raw.ch_names.index('EOG 061') - 1]['kind'] = 202
         idx, scores = ica.find_bads_eog(raw)
         assert_true(isinstance(scores, list))
@@ -536,7 +562,7 @@ def test_ica_additional():
 @requires_sklearn
 def test_run_ica():
     """Test run_ica function"""
-    raw = Raw(raw_fname, preload=True).crop(0, stop, False).crop(1.5)
+    raw = Raw(raw_fname, preload=True).crop(1.5, stop, copy=False)
     params = []
     params += [(None, -1, slice(2), [0, 1])]  # varicance, kurtosis idx
     params += [(None, 'MEG 1531')]  # ECG / EOG channel params
@@ -551,7 +577,7 @@ def test_run_ica():
 @requires_sklearn
 def test_ica_reject_buffer():
     """Test ICA data raw buffer rejection"""
-    raw = Raw(raw_fname).crop(1.5, stop, False)
+    raw = Raw(raw_fname).crop(1.5, stop, copy=False)
     raw.load_data()
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
@@ -569,7 +595,7 @@ def test_ica_reject_buffer():
 @requires_sklearn
 def test_ica_twice():
     """Test running ICA twice"""
-    raw = Raw(raw_fname).crop(1.5, stop, False)
+    raw = Raw(raw_fname).crop(1.5, stop, copy=False)
     raw.load_data()
     picks = pick_types(raw.info, meg='grad', exclude='bads')
     n_components = 0.9
@@ -587,5 +613,71 @@ def test_ica_twice():
                    n_pca_components=1.0, random_state=0)
         ica2.fit(raw_new, picks=picks, decim=3)
         assert_equal(ica1.n_components_, ica2.n_components_)
+
+
+@requires_sklearn
+def test_fit_params():
+    """Test fit_params for ICA"""
+    assert_raises(ValueError, ICA, fit_params=dict(extended=True))
+    fit_params = {}
+    ICA(fit_params=fit_params)  # test no side effects
+    assert_equal(fit_params, {})
+
+
+@requires_sklearn
+def test_bad_channels():
+    """Test if exception is raised when unsupported channels are used.
+    Test for raw and evoked data"""
+    chs = [i for i in _kind_dict]
+    data_chs = _DATA_CH_TYPES_SPLIT + ['eog']
+    chs_bad = list(set(chs) - set(data_chs))
+    info = create_info(len(chs), 500, chs)
+    data = np.random.rand(len(chs), 50)
+    raw = RawArray(data, info)
+    data = np.random.rand(100, len(chs), 50)
+    epochs = EpochsArray(data, info)
+
+    n_components = 0.9
+    ica = ICA(n_components=n_components, method='fastica')
+
+    for inst in [raw, epochs]:
+        for ch in chs_bad:
+            # Test case for only bad channels
+            picks_bad1 = pick_types(inst.info, meg=False,
+                                    **{str(ch): True})
+            # Test case for good and bad channels
+            picks_bad2 = pick_types(inst.info, meg=True,
+                                    **{str(ch): True})
+            assert_raises(ValueError, ica.fit, inst, picks=picks_bad1)
+            assert_raises(ValueError, ica.fit, inst, picks=picks_bad2)
+        assert_raises(ValueError, ica.fit, inst, picks=[])
+
+
+@requires_sklearn
+def test_eog_channel():
+    """Test that EOG channel is included when performing ICA"""
+    raw = Raw(raw_fname, preload=True)
+    events = read_events(event_name)
+    picks = pick_types(raw.info, meg=True, stim=True, ecg=False,
+                       eog=True, exclude='bads')
+    epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
+                    baseline=(None, 0), preload=True)
+    n_components = 0.9
+    ica = ICA(n_components=n_components, method='fastica')
+    # Test case for MEG and EOG data. Should have EOG channel
+    for inst in [raw, epochs]:
+        picks1a = pick_types(inst.info, meg=True, stim=False, ecg=False,
+                             eog=False, exclude='bads')[:4]
+        picks1b = pick_types(inst.info, meg=False, stim=False, ecg=False,
+                             eog=True, exclude='bads')
+        picks1 = np.append(picks1a, picks1b)
+        ica.fit(inst, picks=picks1)
+        assert_true(any('EOG' in ch for ch in ica.ch_names))
+    # Test case for MEG data. Should have no EOG channel
+    for inst in [raw, epochs]:
+        picks1 = pick_types(inst.info, meg=True, stim=False, ecg=False,
+                            eog=False, exclude='bads')[:4]
+        ica.fit(inst, picks=picks1)
+        assert_false(any('EOG' in ch for ch in ica.ch_names))
 
 run_tests_if_main()

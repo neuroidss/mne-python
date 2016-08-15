@@ -10,11 +10,13 @@
 import os.path as op
 import warnings
 
+from nose.tools import assert_true
 import numpy as np
 from numpy.testing import assert_raises, assert_equal
 
 from mne import (make_field_map, pick_channels_evoked, read_evokeds,
                  read_trans, read_dipole, SourceEstimate)
+from mne.io import read_raw_ctf, read_raw_bti, read_raw_kit
 from mne.viz import (plot_sparse_source_estimates, plot_source_estimates,
                      plot_trans)
 from mne.utils import requires_mayavi, requires_pysurfer, run_tests_if_main
@@ -33,10 +35,17 @@ trans_fname = op.join(data_dir, 'MEG', 'sample',
 src_fname = op.join(data_dir, 'subjects', 'sample', 'bem',
                     'sample-oct-6-src.fif')
 dip_fname = op.join(data_dir, 'MEG', 'sample', 'sample_audvis_trunc_set1.dip')
+ctf_fname = op.join(data_dir, 'CTF', 'testdata_ctf.ds')
 
-base_dir = op.join(op.dirname(__file__), '..', '..', 'io', 'tests', 'data')
+io_dir = op.join(op.abspath(op.dirname(__file__)), '..', '..', 'io')
+base_dir = op.join(io_dir, 'tests', 'data')
 evoked_fname = op.join(base_dir, 'test-ave.fif')
 
+base_dir = op.join(io_dir, 'bti', 'tests', 'data')
+pdf_fname = op.join(base_dir, 'test_pdf_linux')
+config_fname = op.join(base_dir, 'test_config_linux')
+hs_fname = op.join(base_dir, 'test_hs_linux')
+sqd_fname = op.join(io_dir, 'kit', 'tests', 'data', 'test.sqd')
 warnings.simplefilter('always')  # enable b/c these tests throw warnings
 
 
@@ -60,11 +69,12 @@ def test_plot_sparse_source_estimates():
     stc = SourceEstimate(stc_data, vertices, 1, 1)
     colormap = 'mne_analyze'
     plot_source_estimates(stc, 'sample', colormap=colormap,
-                          config_opts={'background': (1, 1, 0)},
+                          background=(1, 1, 0),
                           subjects_dir=subjects_dir, colorbar=True,
                           clim='auto')
     assert_raises(TypeError, plot_source_estimates, stc, 'sample',
-                  figure='foo', hemi='both', clim='auto')
+                  figure='foo', hemi='both', clim='auto',
+                  subjects_dir=subjects_dir)
 
     # now do sparse version
     vertices = sample_src[0]['vertno']
@@ -87,24 +97,47 @@ def test_plot_evoked_field():
                           baseline=(-0.2, 0.0))
     evoked = pick_channels_evoked(evoked, evoked.ch_names[::10])  # speed
     for t in ['meg', None]:
-        maps = make_field_map(evoked, trans_fname, subject='sample',
-                              subjects_dir=subjects_dir, n_jobs=1, ch_type=t)
-
+        with warnings.catch_warnings(record=True):  # bad proj
+            maps = make_field_map(evoked, trans_fname, subject='sample',
+                                  subjects_dir=subjects_dir, n_jobs=1,
+                                  ch_type=t)
         evoked.plot_field(maps, time=0.1)
 
 
 @testing.requires_testing_data
 @requires_mayavi
 def test_plot_trans():
-    """Test plotting of -trans.fif files
+    """Test plotting of -trans.fif files and MEG sensor layouts
     """
-    evoked = read_evokeds(evoked_fname, condition='Left Auditory',
-                          baseline=(-0.2, 0.0))
-    plot_trans(evoked.info, trans_fname, subject='sample',
-               subjects_dir=subjects_dir)
-    assert_raises(ValueError, plot_trans, evoked.info, trans_fname,
+    evoked = read_evokeds(evoked_fname)[0]
+    with warnings.catch_warnings(record=True):  # 4D weight tables
+        bti = read_raw_bti(pdf_fname, config_fname, hs_fname, convert=True,
+                           preload=False).info
+    infos = dict(
+        Neuromag=evoked.info,
+        CTF=read_raw_ctf(ctf_fname).info,
+        BTi=bti,
+        KIT=read_raw_kit(sqd_fname).info,
+    )
+    for system, info in infos.items():
+        ref_meg = False if system == 'KIT' else True
+        plot_trans(info, trans_fname, subject='sample', meg_sensors=True,
+                   subjects_dir=subjects_dir, ref_meg=ref_meg)
+    # KIT ref sensor coil def is defined
+    plot_trans(infos['KIT'], None, meg_sensors=True, ref_meg=True)
+    info = infos['Neuromag']
+    assert_raises(ValueError, plot_trans, info, trans_fname,
                   subject='sample', subjects_dir=subjects_dir,
                   ch_type='bad-chtype')
+    assert_raises(TypeError, plot_trans, 'foo', trans_fname,
+                  subject='sample', subjects_dir=subjects_dir)
+    # no-head version
+    plot_trans(info, None, meg_sensors=True, dig=True, coord_frame='head')
+    # EEG only with strange options
+    with warnings.catch_warnings(record=True) as w:
+        plot_trans(evoked.copy().pick_types(meg=False, eeg=True).info,
+                   trans=trans_fname, meg_sensors=True)
+    assert_true(['Cannot plot MEG' in str(ww.message) for ww in w])
 
 
 @testing.requires_testing_data
@@ -131,7 +164,7 @@ def test_limits_to_control_points():
     stc.plot(colormap='hot', clim='auto', subjects_dir=subjects_dir)
     stc.plot(colormap='mne', clim='auto', subjects_dir=subjects_dir)
     figs = [mlab.figure(), mlab.figure()]
-    assert_raises(RuntimeError, stc.plot, clim='auto', figure=figs,
+    assert_raises(ValueError, stc.plot, clim='auto', figure=figs,
                   subjects_dir=subjects_dir)
 
     # Test both types of incorrect limits key (lims/pos_lims)
@@ -168,13 +201,13 @@ def test_limits_to_control_points():
         warnings.simplefilter('always')
         # thresholded maps
         stc._data.fill(1.)
-        plot_source_estimates(stc, subjects_dir=subjects_dir)
+        plot_source_estimates(stc, subjects_dir=subjects_dir, time_unit='s')
         assert_equal(len(w), 0)
         stc._data[0].fill(0.)
-        plot_source_estimates(stc, subjects_dir=subjects_dir)
+        plot_source_estimates(stc, subjects_dir=subjects_dir, time_unit='s')
         assert_equal(len(w), 0)
         stc._data.fill(0.)
-        plot_source_estimates(stc, subjects_dir=subjects_dir)
+        plot_source_estimates(stc, subjects_dir=subjects_dir, time_unit='s')
         assert_equal(len(w), 1)
     mlab.close()
 

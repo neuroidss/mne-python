@@ -16,14 +16,17 @@ from nose.tools import assert_true, assert_equal
 
 from mne import io, read_evokeds, read_proj
 from mne.io.constants import FIFF
+from mne.io.pick import pick_info, channel_indices_by_type
 from mne.channels import read_layout, make_eeg_layout
 from mne.datasets import testing
 from mne.time_frequency.tfr import AverageTFR
-from mne.utils import slow_test
+from mne.utils import slow_test, run_tests_if_main
 
 from mne.viz import plot_evoked_topomap, plot_projs_topomap
-from mne.viz.topomap import (_check_outlines, _onselect, plot_topomap)
-from mne.viz.utils import _find_peaks
+from mne.viz.topomap import (_check_outlines, _onselect, plot_topomap,
+                             plot_psds_topomap)
+from mne.viz.utils import _find_peaks, _fake_click
+
 
 # Set our plotters to test mode
 import matplotlib
@@ -34,7 +37,7 @@ warnings.simplefilter('always')  # enable b/c these tests throw warnings
 
 data_dir = testing.data_path(download=False)
 subjects_dir = op.join(data_dir, 'subjects')
-ecg_fname = op.join(data_dir, 'MEG', 'sample', 'sample_audvis_ecg_proj.fif')
+ecg_fname = op.join(data_dir, 'MEG', 'sample', 'sample_audvis_ecg-proj.fif')
 
 base_dir = op.join(op.dirname(__file__), '..', '..', 'io', 'tests', 'data')
 evoked_fname = op.join(base_dir, 'test-ave.fif')
@@ -45,7 +48,7 @@ layout = read_layout('Vectorview-all')
 
 
 def _get_raw():
-    return io.Raw(raw_fname, preload=False)
+    return io.read_raw_fif(raw_fname, preload=False)
 
 
 @slow_test
@@ -60,13 +63,14 @@ def test_plot_topomap():
     res = 16
     evoked = read_evokeds(evoked_fname, 'Left Auditory',
                           baseline=(None, 0))
+
     # Test animation
     _, anim = evoked.animate_topomap(ch_type='grad', times=[0, 0.1],
                                      butterfly=False)
     anim._func(1)  # _animate has to be tested separately on 'Agg' backend.
     plt.close('all')
 
-    ev_bad = evoked.pick_types(meg=False, eeg=True, copy=True)
+    ev_bad = evoked.copy().pick_types(meg=False, eeg=True)
     ev_bad.pick_channels(ev_bad.ch_names[:2])
     ev_bad.plot_topomap(times=ev_bad.times[:2] - 1e-6)  # auto, plots EEG
     assert_raises(ValueError, ev_bad.plot_topomap, ch_type='mag')
@@ -109,6 +113,13 @@ def test_plot_topomap():
                     for x in subplot.get_children()
                     if isinstance(x, matplotlib.text.Text)))
 
+    # Plot array
+    for ch_type in ('mag', 'grad'):
+        evoked_ = evoked.copy().pick_types(eeg=False, meg=ch_type)
+        plot_topomap(evoked_.data[:, 0], evoked_.info)
+    # fail with multiple channel types
+    assert_raises(ValueError, plot_topomap, evoked.data[0, :], evoked.info)
+
     # Test title
     def get_texts(p):
         return [x.get_text() for x in p.get_children() if
@@ -143,7 +154,7 @@ def test_plot_topomap():
         warnings.simplefilter('always')
         projs = read_proj(ecg_fname)
     projs = [pp for pp in projs if pp['desc'].lower().find('eeg') < 0]
-    plot_projs_topomap(projs, res=res)
+    plot_projs_topomap(projs, res=res, colorbar=True)
     plt.close('all')
     ax = plt.subplot(111)
     plot_projs_topomap([projs[0]], res=res, axes=ax)  # test axes param
@@ -186,6 +197,27 @@ def test_plot_topomap():
 
     # Pass custom outlines without patch
     evoked.plot_topomap(times, ch_type='eeg', outlines=outlines)
+    plt.close('all')
+
+    # Test interactive cmap
+    fig = plot_evoked_topomap(evoked, times=[0., 0.1], ch_type='eeg',
+                              cmap=('Reds', True), title='title')
+    fig.canvas.key_press_event('up')
+    fig.canvas.key_press_event(' ')
+    fig.canvas.key_press_event('down')
+    cbar = fig.get_axes()[0].CB  # Fake dragging with mouse.
+    ax = cbar.cbar.ax
+    _fake_click(fig, ax, (0.1, 0.1))
+    _fake_click(fig, ax, (0.1, 0.2), kind='motion')
+    _fake_click(fig, ax, (0.1, 0.3), kind='release')
+
+    _fake_click(fig, ax, (0.1, 0.1), button=3)
+    _fake_click(fig, ax, (0.1, 0.2), button=3, kind='motion')
+    _fake_click(fig, ax, (0.1, 0.3), kind='release')
+
+    fig.canvas.scroll_event(0.5, 0.5, -0.5)  # scroll down
+    fig.canvas.scroll_event(0.5, 0.5, 0.5)  # scroll up
+
     plt.close('all')
 
     # Pass custom outlines with patch callable
@@ -256,14 +288,30 @@ def test_plot_tfr_topomap():
 
     eclick = mpl.backend_bases.MouseEvent('button_press_event',
                                           plt.gcf().canvas, 0, 0, 1)
-    eclick.xdata = 0.1
-    eclick.ydata = 0.1
+    eclick.xdata = eclick.ydata = 0.1
     eclick.inaxes = plt.gca()
     erelease = mpl.backend_bases.MouseEvent('button_release_event',
                                             plt.gcf().canvas, 0.9, 0.9, 1)
     erelease.xdata = 0.3
     erelease.ydata = 0.2
     pos = [[0.11, 0.11], [0.25, 0.5], [0.0, 0.2], [0.2, 0.39]]
+    _onselect(eclick, erelease, tfr, pos, 'grad', 1, 3, 1, 3, 'RdBu_r', list())
     _onselect(eclick, erelease, tfr, pos, 'mag', 1, 3, 1, 3, 'RdBu_r', list())
+    eclick.xdata = eclick.ydata = 0.
+    erelease.xdata = erelease.ydata = 0.9
     tfr._onselect(eclick, erelease, None, 'mean', None)
     plt.close('all')
+
+    # test plot_psds_topomap
+    info = raw.info.copy()
+    chan_inds = channel_indices_by_type(info)
+    info = pick_info(info, chan_inds['grad'][:4])
+
+    fig, axes = plt.subplots()
+    freqs = np.arange(3., 9.5)
+    bands = [(4, 8, 'Theta')]
+    psd = np.random.rand(len(info['ch_names']), freqs.shape[0])
+    plot_psds_topomap(psd, freqs, info, bands=bands, axes=[axes])
+
+
+run_tests_if_main()

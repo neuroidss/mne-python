@@ -15,7 +15,7 @@ Creating the BEM meshes
 Using the watershed algorithm
 #############################
 
-The watershed algorithm\egonne *et al.*,
+The watershed algorithm [Segonne *et al.*,
 2004] is part of the FreeSurfer software.
 The name of the program is mri_watershed .
 Its use in the MNE environment is facilitated by the script `mne_watershed_bem`.
@@ -59,7 +59,7 @@ that they are collected at the same time with the MPRAGEs or at
 least with the same scanner. For easy co-registration, the images
 should have FOV, matrix, slice thickness, gap, and slice orientation
 as the MPRAGE data. For information on suitable pulse sequences,
-see reference\. Fischl *et al.* and J. Jovicich *et
+see reference [B. Fischl *et al.* and J. Jovicich *et
 al.*, 2006] in :ref:`CEGEGDEI`. At the Martinos
 Center, use of the 1.5-T Avanto scanner (Bay 2) is recommended for
 best results.
@@ -78,9 +78,9 @@ following steps:
 - Inspecting the meshes with tkmedit, see :ref:`BABHJBED`.
 
 .. note:: Different methods can be employed for the creation of the
-          individual surfaces. For example, it may turn out that the 
+          individual surfaces. For example, it may turn out that the
           watershed algorithm produces are better quality skin surface than
-          the segmentation approach based on the FLASH images. If this is 
+          the segmentation approach based on the FLASH images. If this is
           the case, ``outer_skin.surf`` can set to point to the corresponding
           watershed output file while the other surfaces can be picked from
           the FLASH segmentation data.
@@ -158,6 +158,12 @@ Before running mne_flash_bem do the following:
   - ``ln -s``  <*FLASH 5 series dir*> ``flash05``
 
   - ``ln -s``  <*FLASH 30 series dir*> ``flash30``
+
+- Some partition formats (e.g. FAT32) do not support symbolic links. In this case, copy the file to the appropriate series:
+
+  - ``cp`` <*FLASH 5 series dir*> ``flash05``
+
+  - ``cp`` <*FLASH 30 series dir*> ``flash30``
 
 - Set the ``SUBJECTS_DIR`` and ``SUBJECT`` environment
   variables

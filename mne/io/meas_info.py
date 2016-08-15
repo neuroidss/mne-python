@@ -4,11 +4,10 @@
 #
 # License: BSD (3-clause)
 
-import collections
 from copy import deepcopy
 from datetime import datetime as dt
 import os.path as op
-import itertools
+import re
 
 import numpy as np
 from scipy import linalg
@@ -18,14 +17,14 @@ from .constants import FIFF
 from .open import fiff_open
 from .tree import dir_tree_find
 from .tag import read_tag, find_tag
-from .proj import _read_proj, _write_proj, _uniquify_projs
+from .proj import _read_proj, _write_proj, _uniquify_projs, _normalize_proj
 from .ctf_comp import read_ctf_comp, write_ctf_comp
 from .write import (start_file, end_file, start_block, end_block,
                     write_string, write_dig_point, write_float, write_int,
                     write_coord_trans, write_ch_info, write_name_list,
                     write_julian, write_float_matrix)
 from .proc_history import _read_proc_history, _write_proc_history
-from ..utils import logger, verbose, object_hash, warn
+from ..utils import logger, verbose, warn
 from ..fixes import Counter
 from .. import __version__
 from ..externals.six import b, BytesIO, string_types, text_type
@@ -35,11 +34,15 @@ _kind_dict = dict(
     eeg=(FIFF.FIFFV_EEG_CH, FIFF.FIFFV_COIL_EEG, FIFF.FIFF_UNIT_V),
     mag=(FIFF.FIFFV_MEG_CH, FIFF.FIFFV_COIL_VV_MAG_T3, FIFF.FIFF_UNIT_T),
     grad=(FIFF.FIFFV_MEG_CH, FIFF.FIFFV_COIL_VV_PLANAR_T1, FIFF.FIFF_UNIT_T_M),
+    ref_meg=(FIFF.FIFFV_REF_MEG_CH, FIFF.FIFFV_COIL_VV_MAG_T3,
+             FIFF.FIFF_UNIT_T),
     misc=(FIFF.FIFFV_MISC_CH, FIFF.FIFFV_COIL_NONE, FIFF.FIFF_UNIT_NONE),
     stim=(FIFF.FIFFV_STIM_CH, FIFF.FIFFV_COIL_NONE, FIFF.FIFF_UNIT_V),
     eog=(FIFF.FIFFV_EOG_CH, FIFF.FIFFV_COIL_NONE, FIFF.FIFF_UNIT_V),
     ecg=(FIFF.FIFFV_ECG_CH, FIFF.FIFFV_COIL_NONE, FIFF.FIFF_UNIT_V),
-    seeg=(FIFF.FIFFV_SEEG_CH, FIFF.FIFFV_COIL_NONE, FIFF.FIFF_UNIT_V),
+    seeg=(FIFF.FIFFV_SEEG_CH, FIFF.FIFFV_COIL_EEG, FIFF.FIFF_UNIT_V),
+    bio=(FIFF.FIFFV_BIO_CH, FIFF.FIFFV_COIL_NONE, FIFF.FIFF_UNIT_V),
+    ecog=(FIFF.FIFFV_ECOG_CH, FIFF.FIFFV_COIL_EEG, FIFF.FIFF_UNIT_V),
 )
 
 
@@ -48,76 +51,7 @@ def _summarize_str(st):
     return st[:56][::-1].split(',', 1)[-1][::-1] + ', ...'
 
 
-class _ChannelNameList(collections.Sequence):
-    """A read-only list, used to provide convenient access to channel names.
-
-    This list is linked to an Info object. Any changes to the `chs` field of
-    this object are automatically reflected by this list.
-
-    Parameters
-    ----------
-    info : instance of Info
-        The Info structure containing the channel list.
-    """
-    def __init__(self, info):
-        self._channels = info['chs']
-
-    def __getitem__(self, index):
-        """Retrieve the name of the channel with the given index"""
-        if isinstance(index, slice):
-            return [ch['ch_name'] for ch in self._channels[index]]
-        else:
-            return self._channels[index]['ch_name']
-
-    def __len__(self):
-        """Length of the list"""
-        return len(self._channels)
-
-    def __eq__(self, other):
-        """Test for equality"""
-        if isinstance(other, _ChannelNameList):
-            return list(self) == list(other)
-        elif isinstance(other, list):
-            return list(self) == other
-        else:
-            raise ValueError('Cannot compare _ChannelNameList and %s'
-                             % type(other))
-
-    def __ne__(self, other):
-        """Test for non-equality"""
-        return not self.__eq__(other)
-
-    def __repr__(self):
-        """String representation"""
-        if len(self) < 10:
-            channels = ', '.join(self)
-        else:
-            channels = ', '.join(self[:5]) + ' ... ' + ', '.join(self[-5:])
-
-        return '<ChannelNameList | %d channels | %s>' % (len(self), channels)
-
-    def __add__(self, other):
-        """Return a list containing the channels names in both lists"""
-        return list(self) + list(other)
-
-    # Raise descriptive error when the user tries to modify this list.
-    _read_only_error = ("This list of channel names is read-only. It is "
-                        "automatically computed by the info object. "
-                        "Instead of modifying this list, make your "
-                        "modifications to the list of channels in the info "
-                        "object (info['chs']).")
-
-    def __setitem__(self, index, value):
-        raise RuntimeError(_ChannelNameList._read_only_error)
-
-    def __iadd__(self, value):
-        raise RuntimeError(_ChannelNameList._read_only_error)
-
-    def append(self, value):
-        raise RuntimeError(_ChannelNameList._read_only_error)
-
-
-class Info(collections.MutableMapping):
+class Info(dict):
     """Information about the recording.
 
     This data structure behaves like a dictionary. It contains all meta-data
@@ -220,23 +154,6 @@ class Info(collections.MutableMapping):
         processing logs inside of a raw file.
         See: :ref:`faq` for details.
     """
-    # These fields are read only and are computed from other fields
-    _read_only_fields = {
-        'nchan': lambda info: len(info['chs']),
-        'ch_names': lambda info: _ChannelNameList(info),
-    }
-
-    def __init__(self, *args, **kwargs):
-        self._store = dict()
-
-        # When initializing from a dict, silently ignore read-only fields.
-        # This is to keep backwards compatibility.
-        if len(args) == 1 and len(kwargs) == 0 and isinstance(args[0], dict):
-            for key, value in args[0].items():
-                if key not in Info._read_only_fields:
-                    self._store[key] = value
-        else:
-            self.update(dict(*args, **kwargs))
 
     def copy(self):
         """Copy the instance
@@ -246,83 +163,23 @@ class Info(collections.MutableMapping):
         info : instance of Info
             The copied info.
         """
-        return Info(self._store)
+        return Info(deepcopy(self))
 
-    def to_dict(self):
-        """Obtain a version of this info object in the form of a plain Python
-        dict
+    def normalize_proj(self):
+        """(Re-)Normalize projection vectors after subselection
 
-        While the Info object behaves like a dict, it is a subclass of
-        MutableMapping. Use this function to cast it to an actual dict. Be
-        aware that the read-only fields will become writable and will no longer
-        auto-update.
+        Applying projection after sub-selecting a set of channels that
+        were originally used to compute the original projection vectors
+        can be dangerous (e.g., if few channels remain, most power was
+        in channels that are no longer picked, etc.). By default, mne
+        will emit a warning when this is done.
 
-        Notes
-        -----
-        - To cast the plain dict back to an instance of Info, use:
-          `mne.io.Info(info_dict)`
-        - Always use a propert instance of Info when calling MNE-Python
-          functions.
+        This function will re-normalize projectors to use only the
+        remaining channels, thus avoiding that warning. Only use this
+        function if you're confident that the projection vectors still
+        adequately capture the original signal of interest.
         """
-        info_dict = dict(self)
-        # Convert non-standard fields
-        info_dict['ch_names'] = list(info_dict['ch_names'])
-        return info_dict
-
-    def __getitem__(self, key):
-        """Retrieve a value from the data store
-
-        Parameters
-        ----------
-        key : str
-            The key associated with the value to retrieve
-
-        Returns
-        -------
-        value : object
-            The value associated with the key
-        """
-        try:
-            return Info._read_only_fields[key](self)
-        except KeyError:
-            return self._store[key]
-
-    def __setitem__(self, key, value):
-        """Store a value in the data store
-
-        Parameters
-        ----------
-        key : str
-            The key associated with the value for later retrieval
-        value : object
-            The value associated with the key
-        """
-        if key in Info._read_only_fields:
-            raise ValueError('The field %s is read only.' % key)
-        else:
-            self._store[key] = value
-
-    def __delitem__(self, key):
-        """Remove a value from the store
-
-        Parameters
-        ----------
-        key : str
-            The key associated with the value to remove
-        """
-        if key in Info._read_only_fields:
-            raise ValueError('The field %s is read only.' % key)
-        else:
-            del self._store[key]
-
-    # Make the read-only fields show up in info.items()
-    def __iter__(self):
-        return itertools.chain(self._store.keys(),
-                               Info._read_only_fields.keys())
-
-    # Read-only fields add to the length of the info object
-    def __len__(self):
-        return len(self._store) + len(Info._read_only_fields)
+        _normalize_proj(self)
 
     def __repr__(self):
         """Summarize info instead of printing all"""
@@ -344,8 +201,11 @@ class Info(collections.MutableMapping):
                 if len(entr) >= 56:
                     entr = _summarize_str(entr)
             elif k == 'meas_date' and np.iterable(v):
-                # first entire in meas_date is meaningful
+                # first entry in meas_date is meaningful
                 entr = dt.fromtimestamp(v[0]).strftime('%Y-%m-%d %H:%M:%S')
+            elif k == 'kit_system_id' and v is not None:
+                from .kit.constants import SYSNAMES as KIT_SYSNAMES
+                entr = '%i (%s)' % (v, KIT_SYSNAMES.get(v, 'unknown'))
             else:
                 this_len = (len(v) if hasattr(v, '__len__') else
                             ('%s' % v if v is not None else None))
@@ -370,16 +230,20 @@ class Info(collections.MutableMapping):
         st %= non_empty
         return st
 
-    def _anonymize(self):
-        if self.get('subject_info') is not None:
-            del self['subject_info']
-
     def _check_consistency(self):
         """Do some self-consistency checks and datatype tweaks"""
         missing = [bad for bad in self['bads'] if bad not in self['ch_names']]
         if len(missing) > 0:
             raise RuntimeError('bad channel(s) %s marked do not exist in info'
                                % (missing,))
+
+        chs = [ch['ch_name'] for ch in self['chs']]
+        if len(self['ch_names']) != len(chs) or any(
+                ch_1 != ch_2 for ch_1, ch_2 in zip(self['ch_names'], chs)) or \
+                self['nchan'] != len(chs):
+            raise RuntimeError('info channel name inconsistency detected, '
+                               'please notify mne-python developers')
+
         # make sure we have the proper datatypes
         for key in ('sfreq', 'highpass', 'lowpass'):
             if self.get(key) is not None:
@@ -393,8 +257,10 @@ class Info(collections.MutableMapping):
             raise RuntimeError('Channel names are not unique, found '
                                'duplicates for: %s' % dups)
 
-    def __hash__(self):
-        return object_hash(self._store)
+    def _update_redundant(self):
+        """Update the redundant entries"""
+        self['ch_names'] = [ch['ch_name'] for ch in self['chs']]
+        self['nchan'] = len(self['chs'])
 
 
 def read_fiducials(fname):
@@ -493,10 +359,11 @@ def _read_dig_fif(fid, meas_info):
     return dig
 
 
-def _read_dig_points(fname, comments='%'):
+def _read_dig_points(fname, comments='%', unit='auto'):
     """Read digitizer data from a text file.
 
-    This function can read space-delimited text files of digitizer data.
+    If fname ends in .hsp or .esp, the function assumes digitizer files in [m],
+    otherwise it assumes space-delimited text files in [mm].
 
     Parameters
     ----------
@@ -505,16 +372,44 @@ def _read_dig_points(fname, comments='%'):
     comments : str
         The character used to indicate the start of a comment;
         Default: '%'.
+    unit : 'auto' | 'm' | 'cm' | 'mm'
+        Unit of the digitizer files (hsp and elp). If not 'm', coordinates will
+        be rescaled to 'm'. Default is 'auto', which assumes 'm' for *.hsp and
+        *.elp files and 'mm' for *.txt files, corresponding to the known
+        Polhemus export formats.
 
     Returns
     -------
     dig_points : np.ndarray, shape (n_points, 3)
-        Array of dig points.
+        Array of dig points in [m].
     """
-    dig_points = np.loadtxt(fname, comments=comments, ndmin=2)
+    if unit not in ('auto', 'm', 'mm', 'cm'):
+        raise ValueError('unit must be one of "auto", "m", "mm", or "cm"')
+
+    _, ext = op.splitext(fname)
+    if ext == '.elp' or ext == '.hsp':
+        with open(fname) as fid:
+            file_str = fid.read()
+        value_pattern = "\-?\d+\.?\d*e?\-?\d*"
+        coord_pattern = "({0})\s+({0})\s+({0})\s*$".format(value_pattern)
+        if ext == '.hsp':
+            coord_pattern = '^' + coord_pattern
+        points_str = [m.groups() for m in re.finditer(coord_pattern, file_str,
+                                                      re.MULTILINE)]
+        dig_points = np.array(points_str, dtype=float)
+    else:
+        dig_points = np.loadtxt(fname, comments=comments, ndmin=2)
+        if unit == 'auto':
+            unit = 'mm'
+
     if dig_points.shape[-1] != 3:
         err = 'Data must be (n, 3) instead of %s' % (dig_points.shape,)
         raise ValueError(err)
+
+    if unit == 'mm':
+        dig_points /= 1000.
+    elif unit == 'cm':
+        dig_points /= 100.
 
     return dig_points
 
@@ -651,8 +546,8 @@ def read_info(fname, verbose=None):
 
     Returns
     -------
-    info : instance of mne.io.meas_info.Info
-       Info on dataset.
+    info : instance of Info
+       Measurement information for the dataset.
     """
     f, tree, _ = fiff_open(fname)
     with f as fid:
@@ -706,7 +601,7 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
 
     Returns
     -------
-    info : instance of mne.io.meas_info.Info
+    info : instance of Info
        Info on dataset.
     meas : dict
         Node in tree that contains the info.
@@ -744,6 +639,7 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
     line_freq = None
     custom_ref_applied = False
     xplotter_layout = None
+    kit_system_id = None
     for k in range(meas_info['nent']):
         kind = meas_info['directory'][k].kind
         pos = meas_info['directory'][k].pos
@@ -799,10 +695,13 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
         elif kind == FIFF.FIFF_XPLOTTER_LAYOUT:
             tag = read_tag(fid, pos)
             xplotter_layout = str(tag.data)
+        elif kind == FIFF.FIFF_MNE_KIT_SYSTEM_ID:
+            tag = read_tag(fid, pos)
+            kit_system_id = int(tag.data)
 
     # Check that we have everything we need
     if nchan is None:
-        raise ValueError('Number of channels in not defined')
+        raise ValueError('Number of channels is not defined')
 
     if sfreq is None:
         raise ValueError('Sampling frequency is not defined')
@@ -1043,9 +942,8 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
     info['proj_name'] = proj_name
 
     if meas_date is None:
-        info['meas_date'] = [info['meas_id']['secs'], info['meas_id']['usecs']]
-    else:
-        info['meas_date'] = meas_date
+        meas_date = [info['meas_id']['secs'], info['meas_id']['usecs']]
+    info['meas_date'] = meas_date
 
     info['sfreq'] = sfreq
     info['highpass'] = highpass if highpass is not None else 0.
@@ -1071,6 +969,7 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
     #   All kinds of auxliary stuff
     info['dig'] = dig
     info['bads'] = bads
+    info._update_redundant()
     if clean_bads:
         info['bads'] = [b for b in bads if b in info['ch_names']]
     info['projs'] = projs
@@ -1079,8 +978,8 @@ def read_meas_info(fid, tree, clean_bads=False, verbose=None):
     info['acq_stim'] = acq_stim
     info['custom_ref_applied'] = custom_ref_applied
     info['xplotter_layout'] = xplotter_layout
+    info['kit_system_id'] = kit_system_id
     info._check_consistency()
-
     return info, meas
 
 
@@ -1091,7 +990,7 @@ def write_meas_info(fid, info, data_type=None, reset_range=True):
     ----------
     fid : file
         Open file descriptor.
-    info : instance of mne.io.meas_info.Info
+    info : instance of Info
         The measurement info structure.
     data_type : int
         The data_type in case it is necessary. Should be 4 (FIFFT_FLOAT),
@@ -1294,6 +1193,10 @@ def write_meas_info(fid, info, data_type=None, reset_range=True):
     #   CTF compensation info
     write_ctf_comp(fid, info['comps'])
 
+    #   KIT system ID
+    if info.get('kit_system_id') is not None:
+        write_int(fid, FIFF.FIFF_MNE_KIT_SYSTEM_ID, info['kit_system_id'])
+
     end_block(fid, FIFF.FIFFB_MEAS_INFO)
 
     #   Processing history
@@ -1307,7 +1210,7 @@ def write_info(fname, info, data_type=None, reset_range=True):
     ----------
     fname : str
         The name of the file. Should end by -info.fif.
-    info : instance of mne.io.meas_info.Info
+    info : instance of Info
         The measurement info structure
     data_type : int
         The data_type in case it is necessary. Should be 4 (FIFFT_FLOAT),
@@ -1329,8 +1232,14 @@ def _is_equal_dict(dicts):
     is_equal = []
     for d in tests:
         k0, v0 = d[0]
-        is_equal.append(all(np.all(k == k0) and
-                        np.all(v == v0) for k, v in d))
+        if (isinstance(v0, (list, np.ndarray)) and len(v0) > 0 and
+                isinstance(v0[0], dict)):
+            for k, v in d:
+                is_equal.append((k0 == k) and _is_equal_dict(v))
+        else:
+            is_equal.append(all(np.all(k == k0) and
+                            (np.array_equal(v, v0) if isinstance(v, np.ndarray)
+                             else np.all(v == v0)) for k, v in d))
     return all(is_equal)
 
 
@@ -1415,7 +1324,7 @@ def _merge_dict_values(dicts, key, verbose=None):
 
 
 @verbose
-def _merge_info(infos, verbose=None):
+def _merge_info(infos, force_update_to_first=False, verbose=None):
     """Merge multiple measurement info dictionaries.
 
      - Fields that are present in only one info object will be used in the
@@ -1431,6 +1340,10 @@ def _merge_info(infos, verbose=None):
     ----------
     infos | list of instance of Info
         Info objects to merge into one info object.
+    force_update_to_first : bool
+        If True, force the fields for objects in `info` will be updated
+        to match those in the first item. Use at your own risk, as this
+        may overwrite important metadata.
     verbose : bool, str, int, or NonIe
         If not None, override default verbose level (see mne.verbose).
 
@@ -1441,10 +1354,14 @@ def _merge_info(infos, verbose=None):
     """
     for info in infos:
         info._check_consistency()
+    if force_update_to_first is True:
+        infos = deepcopy(infos)
+        _force_update_info(infos[0], infos[1:])
     info = Info()
     info['chs'] = []
     for this_info in infos:
         info['chs'].extend(this_info['chs'])
+    info._update_redundant()
     duplicates = set([ch for ch in info['ch_names']
                       if info['ch_names'].count(ch) > 1])
     if len(duplicates) > 0:
@@ -1468,6 +1385,17 @@ def _merge_info(infos, verbose=None):
             msg = ("Measurement infos provide mutually inconsistent %s" %
                    trans_name)
             raise ValueError(msg)
+
+    # KIT system-IDs
+    kit_sys_ids = [i['kit_system_id'] for i in infos if i['kit_system_id']]
+    if len(kit_sys_ids) == 0:
+        info['kit_system_id'] = None
+    elif len(set(kit_sys_ids)) == 1:
+        info['kit_system_id'] = kit_sys_ids[0]
+    else:
+        raise ValueError("Trying to merge channels from different KIT systems")
+
+    # other fields
     other_fields = ['acq_pars', 'acq_stim', 'bads', 'buffer_size_sec',
                     'comps', 'custom_ref_applied', 'description', 'dig',
                     'experimenter', 'file_id', 'filename', 'highpass',
@@ -1475,9 +1403,9 @@ def _merge_info(infos, verbose=None):
                     'line_freq', 'lowpass', 'meas_date', 'meas_id',
                     'proj_id', 'proj_name', 'projs', 'sfreq',
                     'subject_info', 'sfreq', 'xplotter_layout']
-
     for k in other_fields:
         info[k] = _merge_dict_values(infos, k)
+
     info._check_consistency()
     return info
 
@@ -1489,12 +1417,13 @@ def create_info(ch_names, sfreq, ch_types=None, montage=None):
     ----------
     ch_names : list of str | int
         Channel names. If an int, a list of channel names will be created
-        from range(ch_names)
+        from :func:`range(ch_names) <range>`.
     sfreq : float
         Sample rate of the data.
     ch_types : list of str | str
         Channel types. If None, data are assumed to be misc.
-        Currently supported fields are "mag", "grad", "eeg", and "misc".
+        Currently supported fields are 'ecg', 'bio', 'stim', 'eog', 'misc',
+        'seeg', 'ecog', 'mag', 'eeg', 'ref_meg' or 'grad'.
         If str, then all channels are assumed to be of the same type.
     montage : None | str | Montage | DigMontage | list
         A montage containing channel positions. If str or Montage is
@@ -1503,6 +1432,11 @@ def create_info(ch_names, sfreq, ch_types=None, montage=None):
         digitizer information will be updated. A list of unique montages,
         can be specifed and applied to the info. See also the documentation of
         :func:`mne.channels.read_montage` for more information.
+
+    Returns
+    -------
+    info : instance of Info
+        The measurement info.
 
     Notes
     -----
@@ -1527,7 +1461,8 @@ def create_info(ch_names, sfreq, ch_types=None, montage=None):
     if isinstance(ch_types, string_types):
         ch_types = [ch_types] * nchan
     if len(ch_types) != nchan:
-        raise ValueError('ch_types and ch_names must be the same length')
+        raise ValueError('ch_types and ch_names must be the same length '
+                         '(%s != %s)' % (len(ch_types), nchan))
     info = _empty_info(sfreq)
     info['meas_date'] = np.array([0, 0], np.int32)
     loc = np.concatenate((np.zeros(3), np.eye(3).ravel())).astype(np.float32)
@@ -1545,6 +1480,7 @@ def create_info(ch_names, sfreq, ch_types=None, montage=None):
                          unit=kind[2], coord_frame=FIFF.FIFFV_COORD_UNKNOWN,
                          ch_name=name, scanno=ci + 1, logno=ci + 1)
         info['chs'].append(chan_info)
+    info._update_redundant()
     if montage is not None:
         from ..channels.montage import (Montage, DigMontage, _set_montage,
                                         read_montage)
@@ -1560,6 +1496,7 @@ def create_info(ch_names, sfreq, ch_types=None, montage=None):
                 raise TypeError('Montage must be an instance of Montage, '
                                 'DigMontage, a list of montages, or filepath, '
                                 'not %s.' % type(montage))
+    info._check_consistency()
     return info
 
 
@@ -1568,9 +1505,9 @@ RAW_INFO_FIELDS = (
     'comps', 'ctf_head_t', 'custom_ref_applied', 'description', 'dev_ctf_t',
     'dev_head_t', 'dig', 'experimenter', 'events',
     'file_id', 'filename', 'highpass', 'hpi_meas', 'hpi_results',
-    'hpi_subsystem', 'line_freq', 'lowpass', 'meas_date', 'meas_id', 'nchan',
-    'proj_id', 'proj_name', 'projs', 'sfreq', 'subject_info',
-    'xplotter_layout',
+    'hpi_subsystem', 'kit_system_id', 'line_freq', 'lowpass', 'meas_date',
+    'meas_id', 'nchan', 'proj_id', 'proj_name', 'projs', 'sfreq',
+    'subject_info', 'xplotter_layout',
 )
 
 
@@ -1580,8 +1517,8 @@ def _empty_info(sfreq):
     _none_keys = (
         'acq_pars', 'acq_stim', 'buffer_size_sec', 'ctf_head_t', 'description',
         'dev_ctf_t', 'dig', 'experimenter',
-        'file_id', 'filename', 'highpass', 'hpi_subsystem', 'line_freq',
-        'lowpass', 'meas_date', 'meas_id', 'proj_id', 'proj_name',
+        'file_id', 'filename', 'highpass', 'hpi_subsystem', 'kit_system_id',
+        'line_freq', 'lowpass', 'meas_date', 'meas_id', 'proj_id', 'proj_name',
         'subject_info', 'xplotter_layout',
     )
     _list_keys = ('bads', 'chs', 'comps', 'events', 'hpi_meas', 'hpi_results',
@@ -1596,5 +1533,66 @@ def _empty_info(sfreq):
     info['highpass'] = 0.
     info['sfreq'] = float(sfreq)
     info['lowpass'] = info['sfreq'] / 2.
+    info._update_redundant()
     info._check_consistency()
+    return info
+
+
+def _force_update_info(info_base, info_target):
+    """Update target info objects with values from info base.
+
+    Note that values in info_target will be overwritten by those in info_base.
+    This will overwrite all fields except for: 'chs', 'ch_names', 'nchan'.
+
+    Parameters
+    ----------
+    info_base : mne.Info
+        The Info object you want to use for overwriting values
+        in target Info objects.
+    info_target : mne.Info | list of mne.Info
+        The Info object(s) you wish to overwrite using info_base. These objects
+        will be modified in-place.
+    """
+    exclude_keys = ['chs', 'ch_names', 'nchan']
+    info_target = np.atleast_1d(info_target).ravel()
+    all_infos = np.hstack([info_base, info_target])
+    for ii in all_infos:
+        if not isinstance(ii, Info):
+            raise ValueError('Inputs must be of type Info. '
+                             'Found type %s' % type(ii))
+    for key, val in info_base.items():
+        if key in exclude_keys:
+            continue
+        for i_targ in info_target:
+            i_targ[key] = val
+
+
+def anonymize_info(info):
+    """Anonymize measurement information in place.
+
+    Reset 'subject_info', 'meas_date', 'file_id', and 'meas_id' keys if they
+    exist in ``info``.
+
+    Parameters
+    ----------
+    info : dict, instance of Info
+        Measurement information for the dataset.
+
+    Returns
+    -------
+    info : instance of Info
+        Measurement information for the dataset.
+
+    Notes
+    -----
+    Operates in place.
+    """
+    if not isinstance(info, Info):
+        raise ValueError('self must be an Info instance.')
+    if info.get('subject_info') is not None:
+        del info['subject_info']
+    info['meas_date'] = [0, 0]
+    for key_1 in ('file_id', 'meas_id'):
+        for key_2 in ('secs', 'msecs', 'usecs'):
+            info[key_1][key_2] = 0
     return info

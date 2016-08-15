@@ -17,14 +17,15 @@ from mne.chpi import read_head_pos, filter_chpi
 from mne.forward import _prep_meg_channels
 from mne.cov import _estimate_rank_meeg_cov
 from mne.datasets import testing
-from mne.io import Raw, proc_history, read_info, read_raw_bti, read_raw_kit
+from mne.io import (Raw, proc_history, read_info, read_raw_bti, read_raw_kit,
+                    _BaseRaw)
 from mne.preprocessing.maxwell import (
     maxwell_filter, _get_n_moments, _sss_basis_basic, _sh_complex_to_real,
     _sh_real_to_complex, _sh_negate, _bases_complex_to_real, _trans_sss_basis,
     _bases_real_to_complex, _sph_harm, _prep_mf_coils)
 from mne.tests.common import assert_meg_snr
 from mne.utils import (_TempDir, run_tests_if_main, slow_test, catch_logging,
-                       requires_version, object_diff)
+                       requires_version, object_diff, buggy_mkl_svd)
 from mne.externals.six import PY3
 
 warnings.simplefilter('always')  # Always throw warnings
@@ -76,6 +77,20 @@ ctc_mgh_fname = op.join(sss_path, 'ct_sparse_mgh.fif')
 sample_fname = op.join(data_path, 'MEG', 'sample',
                        'sample_audvis_trunc_raw.fif')
 
+triux_path = op.join(data_path, 'SSS', 'TRIUX')
+tri_fname = op.join(triux_path, 'triux_bmlhus_erm_raw.fif')
+tri_sss_fname = op.join(triux_path, 'triux_bmlhus_erm_raw_sss.fif')
+tri_sss_reg_fname = op.join(triux_path, 'triux_bmlhus_erm_regIn_raw_sss.fif')
+tri_sss_st4_fname = op.join(triux_path, 'triux_bmlhus_erm_st4_raw_sss.fif')
+tri_sss_ctc_fname = op.join(triux_path, 'triux_bmlhus_erm_ctc_raw_sss.fif')
+tri_sss_cal_fname = op.join(triux_path, 'triux_bmlhus_erm_cal_raw_sss.fif')
+tri_sss_ctc_cal_fname = op.join(
+    triux_path, 'triux_bmlhus_erm_ctc_cal_raw_sss.fif')
+tri_sss_ctc_cal_reg_in_fname = op.join(
+    triux_path, 'triux_bmlhus_erm_ctc_cal_regIn_raw_sss.fif')
+tri_ctc_fname = op.join(triux_path, 'ct_sparse_BMLHUS.fif')
+tri_cal_fname = op.join(triux_path, 'sss_cal_BMLHUS.dat')
+
 io_dir = op.join(op.dirname(__file__), '..', '..', 'io')
 fname_ctf_raw = op.join(io_dir, 'tests', 'data', 'test_ctf_comp_raw.fif')
 
@@ -107,7 +122,7 @@ def _assert_n_free(raw_sss, lower, upper=None):
 def test_movement_compensation():
     """Test movement compensation"""
     temp_dir = _TempDir()
-    lims = (0, 4)
+    lims = (0, 4, False)
     raw = Raw(raw_fname, allow_maxshield='yes', preload=True).crop(*lims)
     head_pos = read_head_pos(pos_fname)
 
@@ -172,16 +187,15 @@ def test_movement_compensation():
     head_pos_bad[0, 0] = raw.first_samp / raw.info['sfreq'] - 1e-2
     assert_raises(ValueError, maxwell_filter, raw, head_pos=head_pos_bad)
     # make sure numerical error doesn't screw it up, though
-    head_pos_bad[0, 0] = raw.first_samp / raw.info['sfreq'] - 1e-4
+    head_pos_bad[0, 0] = raw.first_samp / raw.info['sfreq'] - 5e-4
     raw_sss_tweak = maxwell_filter(raw, head_pos=head_pos_bad,
                                    origin=mf_head_origin)
-    assert_meg_snr(raw_sss_tweak, raw_sss, 2., 10.)
+    assert_meg_snr(raw_sss_tweak, raw_sss, 2., 10., chpi_med_tol=11)
 
 
 @slow_test
 def test_other_systems():
-    """Test Maxwell filtering on KIT, BTI, and CTF files
-    """
+    """Test Maxwell filtering on KIT, BTI, and CTF files"""
     # KIT
     kit_dir = op.join(io_dir, 'kit', 'tests', 'data')
     sqd_path = op.join(kit_dir, 'test.sqd')
@@ -193,6 +207,9 @@ def test_other_systems():
         assert_raises(RuntimeError, maxwell_filter, raw_kit)
     raw_sss = maxwell_filter(raw_kit, origin=(0., 0., 0.04), ignore_ref=True)
     _assert_n_free(raw_sss, 65, 65)
+    raw_sss_auto = maxwell_filter(raw_kit, origin=(0., 0., 0.04),
+                                  ignore_ref=True, mag_scale='auto')
+    assert_allclose(raw_sss._data, raw_sss_auto._data)
     # XXX this KIT origin fit is terrible! Eventually we should get a
     # corrected HSP file with proper coverage
     with warnings.catch_warnings(record=True):
@@ -232,18 +249,29 @@ def test_other_systems():
     bti_hs = op.join(bti_dir, 'test_hs_linux')
     with warnings.catch_warnings(record=True):  # weght table
         raw_bti = read_raw_bti(bti_pdf, bti_config, bti_hs, preload=False)
+    picks = pick_types(raw_bti.info, meg='mag', exclude=())
+    power = np.sqrt(np.sum(raw_bti[picks][0] ** 2))
     raw_sss = maxwell_filter(raw_bti)
     _assert_n_free(raw_sss, 70)
+    _assert_shielding(raw_sss, power, 0.5)
+    raw_sss_auto = maxwell_filter(raw_bti, mag_scale='auto', verbose=True)
+    _assert_shielding(raw_sss_auto, power, 0.7)
 
     # CTF
-    raw_ctf = Raw(fname_ctf_raw, compensation=2)
-    assert_raises(RuntimeError, maxwell_filter, raw_ctf)  # compensated
     raw_ctf = Raw(fname_ctf_raw)
+    assert_equal(raw_ctf.compensation_grade, 3)
+    assert_raises(RuntimeError, maxwell_filter, raw_ctf)  # compensated
+    raw_ctf.apply_gradient_compensation(0)
     assert_raises(ValueError, maxwell_filter, raw_ctf)  # cannot fit headshape
     raw_sss = maxwell_filter(raw_ctf, origin=(0., 0., 0.04))
     _assert_n_free(raw_sss, 68)
+    _assert_shielding(raw_sss, raw_ctf, 1.8)
     raw_sss = maxwell_filter(raw_ctf, origin=(0., 0., 0.04), ignore_ref=True)
     _assert_n_free(raw_sss, 70)
+    _assert_shielding(raw_sss, raw_ctf, 12)
+    raw_sss_auto = maxwell_filter(raw_ctf, origin=(0., 0., 0.04),
+                                  ignore_ref=True, mag_scale='auto')
+    assert_allclose(raw_sss._data, raw_sss_auto._data)
 
 
 def test_spherical_harmonics():
@@ -348,7 +376,7 @@ def test_multipolar_bases():
 def test_basic():
     """Test Maxwell filter basic version"""
     # Load testing data (raw, SSS std origin, SSS non-standard origin)
-    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1., False)
+    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1., copy=False)
     raw_err = Raw(raw_fname, proj=True, allow_maxshield='yes')
     raw_erm = Raw(erm_fname, allow_maxshield='yes')
     assert_raises(RuntimeError, maxwell_filter, raw_err)
@@ -399,13 +427,10 @@ def test_basic():
                  proc_history._get_sss_rank(sss_info))
 
     # Degenerate cases
-    raw_bad = raw.copy()
-    raw_bad.comp = True
-    assert_raises(RuntimeError, maxwell_filter, raw_bad)
-    del raw_bad
     assert_raises(ValueError, maxwell_filter, raw, coord_frame='foo')
     assert_raises(ValueError, maxwell_filter, raw, origin='foo')
     assert_raises(ValueError, maxwell_filter, raw, origin=[0] * 4)
+    assert_raises(ValueError, maxwell_filter, raw, mag_scale='foo')
 
 
 @testing.requires_testing_data
@@ -422,7 +447,7 @@ def test_maxwell_filter_additional():
     raw_fname = op.join(data_path, 'SSS', file_name + '_raw.fif')
 
     # Use 2.0 seconds of data to get stable cov. estimate
-    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 2., False)
+    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 2., copy=False)
 
     # Get MEG channels, compute Maxwell filtered data
     raw.load_data()
@@ -458,7 +483,7 @@ def test_maxwell_filter_additional():
 @testing.requires_testing_data
 def test_bads_reconstruction():
     """Test Maxwell filter reconstruction of bad channels"""
-    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1., False)
+    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1.)
     raw.info['bads'] = bads
     raw_sss = maxwell_filter(raw, origin=mf_head_origin, regularize=None,
                              bad_condition='ignore')
@@ -524,7 +549,8 @@ def test_spatiotemporal_maxwell():
 def test_spatiotemporal_only():
     """Test tSSS-only processing"""
     # Load raw testing data
-    raw = Raw(raw_fname, allow_maxshield='yes').crop(0, 2).load_data()
+    raw = Raw(raw_fname,
+              allow_maxshield='yes').crop(0, 2, copy=False).load_data()
     picks = pick_types(raw.info, meg='mag', exclude=())
     power = np.sqrt(np.sum(raw[picks][0] ** 2))
     # basics
@@ -576,7 +602,7 @@ def test_fine_calibration():
     """Test Maxwell filter fine calibration"""
 
     # Load testing data (raw, SSS std origin, SSS non-standard origin)
-    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1., False)
+    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1., copy=False)
     sss_fine_cal = Raw(sss_fine_cal_fname)
 
     # Test 1D SSS fine calibration
@@ -600,7 +626,7 @@ def test_fine_calibration():
                                 origin=mf_head_origin, regularize=None,
                                 bad_condition='ignore')
     assert_meg_snr(raw_sss_3D, sss_fine_cal, 1.0, 6.)
-    raw_ctf = Raw(fname_ctf_raw)
+    raw_ctf = Raw(fname_ctf_raw).apply_gradient_compensation(0)
     assert_raises(RuntimeError, maxwell_filter, raw_ctf, origin=(0., 0., 0.04),
                   calibration=fine_cal_fname)
 
@@ -619,7 +645,7 @@ def test_regularization():
                   sss_samp_reg_in_fname)
     comp_tols = [0, 1, 4]
     for ii, rf in enumerate(raw_fnames):
-        raw = Raw(rf, allow_maxshield='yes').crop(0., 1., False)
+        raw = Raw(rf, allow_maxshield='yes').crop(0., 1.)
         sss_reg_in = Raw(sss_fnames[ii])
 
         # Test "in" regularization
@@ -628,25 +654,30 @@ def test_regularization():
         assert_meg_snr(raw_sss, sss_reg_in, min_tols[ii], med_tols[ii], msg=rf)
 
         # check components match
-        py_info = raw_sss.info['proc_history'][0]['max_info']['sss_info']
-        assert_true(py_info is not None)
-        assert_true(len(py_info) > 0)
-        mf_info = sss_reg_in.info['proc_history'][0]['max_info']['sss_info']
-        n_in = None
-        for inf in py_info, mf_info:
-            if n_in is None:
-                n_in = _get_n_moments(inf['in_order'])
-            else:
-                assert_equal(n_in, _get_n_moments(inf['in_order']))
-            assert_equal(inf['components'][:n_in].sum(), inf['nfree'])
-        assert_allclose(py_info['nfree'], mf_info['nfree'],
-                        atol=comp_tols[ii], err_msg=rf)
+        _check_reg_match(raw_sss, sss_reg_in, comp_tols[ii])
+
+
+def _check_reg_match(sss_py, sss_mf, comp_tol):
+    """Helper to check regularization"""
+    info_py = sss_py.info['proc_history'][0]['max_info']['sss_info']
+    assert_true(info_py is not None)
+    assert_true(len(info_py) > 0)
+    info_mf = sss_mf.info['proc_history'][0]['max_info']['sss_info']
+    n_in = None
+    for inf in (info_py, info_mf):
+        if n_in is None:
+            n_in = _get_n_moments(inf['in_order'])
+        else:
+            assert_equal(n_in, _get_n_moments(inf['in_order']))
+        assert_equal(inf['components'][:n_in].sum(), inf['nfree'])
+    assert_allclose(info_py['nfree'], info_mf['nfree'],
+                    atol=comp_tol, err_msg=sss_py._filenames[0])
 
 
 @testing.requires_testing_data
 def test_cross_talk():
     """Test Maxwell filter cross-talk cancellation"""
-    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1., False)
+    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1., copy=False)
     raw.info['bads'] = bads
     sss_ctc = Raw(sss_ctc_fname)
     raw_sss = maxwell_filter(raw, cross_talk=ctc_fname,
@@ -660,13 +691,13 @@ def test_cross_talk():
     mf_ctc = sss_ctc.info['proc_history'][0]['max_info']['sss_ctc']
     del mf_ctc['block_id']  # we don't write this
     assert_equal(object_diff(py_ctc, mf_ctc), '')
-    raw_ctf = Raw(fname_ctf_raw)
+    raw_ctf = Raw(fname_ctf_raw).apply_gradient_compensation(0)
     assert_raises(ValueError, maxwell_filter, raw_ctf)  # cannot fit headshape
     raw_sss = maxwell_filter(raw_ctf, origin=(0., 0., 0.04))
     _assert_n_free(raw_sss, 68)
     raw_sss = maxwell_filter(raw_ctf, origin=(0., 0., 0.04), ignore_ref=True)
     _assert_n_free(raw_sss, 70)
-    raw_missing = raw.crop(0, 0.1, copy=True).load_data().pick_channels(
+    raw_missing = raw.copy().crop(0, 0.1).load_data().pick_channels(
         [raw.ch_names[pi] for pi in pick_types(raw.info, meg=True,
                                                exclude=())[3:]])
     with warnings.catch_warnings(record=True) as w:
@@ -681,12 +712,12 @@ def test_cross_talk():
 @testing.requires_testing_data
 def test_head_translation():
     """Test Maxwell filter head translation"""
-    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1., False)
+    raw = Raw(raw_fname, allow_maxshield='yes').crop(0., 1., copy=False)
     # First try with an unchanged destination
     raw_sss = maxwell_filter(raw, destination=raw_fname,
                              origin=mf_head_origin, regularize=None,
                              bad_condition='ignore')
-    assert_meg_snr(raw_sss, Raw(sss_std_fname).crop(0., 1., False), 200.)
+    assert_meg_snr(raw_sss, Raw(sss_std_fname).crop(0., 1.), 200.)
     # Now with default
     with warnings.catch_warnings(record=True):
         with catch_logging() as log:
@@ -720,7 +751,11 @@ def test_head_translation():
 
 def _assert_shielding(raw_sss, erm_power, shielding_factor, meg='mag'):
     """Helper to assert a minimum shielding factor using empty-room power"""
-    picks = pick_types(raw_sss.info, meg=meg)
+    picks = pick_types(raw_sss.info, meg=meg, ref_meg=False)
+    if isinstance(erm_power, _BaseRaw):
+        picks_erm = pick_types(raw_sss.info, meg=meg, ref_meg=False)
+        assert_allclose(picks, picks_erm)
+        erm_power = np.sqrt((erm_power[picks_erm][0] ** 2).sum())
     sss_power = raw_sss[picks][0].ravel()
     sss_power = np.sqrt(np.sum(sss_power * sss_power))
     factor = erm_power / sss_power
@@ -728,6 +763,7 @@ def _assert_shielding(raw_sss, erm_power, shielding_factor, meg='mag'):
                 'Shielding factor %0.3f < %0.3f' % (factor, shielding_factor))
 
 
+@buggy_mkl_svd
 @slow_test
 @requires_svd_convergence
 @testing.requires_testing_data
@@ -737,11 +773,28 @@ def test_shielding_factor():
     picks = pick_types(raw_erm.info, meg='mag')
     erm_power = raw_erm[picks][0]
     erm_power = np.sqrt(np.sum(erm_power * erm_power))
+    erm_power_grad = raw_erm[pick_types(raw_erm.info, meg='grad')][0]
+    erm_power_grad = np.sqrt(np.sum(erm_power * erm_power))
 
     # Vanilla SSS (second value would be for meg=True instead of meg='mag')
     _assert_shielding(Raw(sss_erm_std_fname), erm_power, 10)  # 1.5)
     raw_sss = maxwell_filter(raw_erm, coord_frame='meg', regularize=None)
     _assert_shielding(raw_sss, erm_power, 12)  # 1.5)
+    _assert_shielding(raw_sss, erm_power_grad, 0.45, 'grad')  # 1.5)
+
+    # Using different mag_scale values
+    raw_sss = maxwell_filter(raw_erm, coord_frame='meg', regularize=None,
+                             mag_scale='auto')
+    _assert_shielding(raw_sss, erm_power, 12)
+    _assert_shielding(raw_sss, erm_power_grad, 0.48, 'grad')
+    raw_sss = maxwell_filter(raw_erm, coord_frame='meg', regularize=None,
+                             mag_scale=1.)  # not a good choice
+    _assert_shielding(raw_sss, erm_power, 7.3)
+    _assert_shielding(raw_sss, erm_power_grad, 0.2, 'grad')
+    raw_sss = maxwell_filter(raw_erm, coord_frame='meg', regularize=None,
+                             mag_scale=1000., bad_condition='ignore')
+    _assert_shielding(raw_sss, erm_power, 4.0)
+    _assert_shielding(raw_sss, erm_power_grad, 0.1, 'grad')
 
     # Fine cal
     _assert_shielding(Raw(sss_erm_fine_cal_fname), erm_power, 12)  # 2.0)
@@ -802,6 +855,13 @@ def test_shielding_factor():
                              cross_talk=ctc_fname, st_duration=1.,
                              coord_frame='meg', regularize='in')
     _assert_shielding(raw_sss, erm_power, 58)  # 7.0)
+    _assert_shielding(raw_sss, erm_power_grad, 1.6, 'grad')
+    raw_sss = maxwell_filter(raw_erm, calibration=fine_cal_fname,
+                             cross_talk=ctc_fname, st_duration=1.,
+                             coord_frame='meg', regularize='in',
+                             mag_scale='auto')
+    _assert_shielding(raw_sss, erm_power, 51)
+    _assert_shielding(raw_sss, erm_power_grad, 1.5, 'grad')
     raw_sss = maxwell_filter(raw_erm, calibration=fine_cal_fname_3d,
                              cross_talk=ctc_fname, st_duration=1.,
                              coord_frame='meg', regularize='in')
@@ -839,7 +899,7 @@ def test_all():
     coord_frames = ('head', 'head', 'meg', 'head')
     ctcs = (ctc_fname, ctc_fname, ctc_fname, ctc_mgh_fname)
     mins = (3.5, 3.5, 1.2, 0.9)
-    meds = (10.9, 10.4, 3.2, 6.)
+    meds = (10.8, 10.4, 3.2, 6.)
     st_durs = (1., 1., 1., None)
     destinations = (None, sample_fname, None, None)
     origins = (mf_head_origin,
@@ -847,7 +907,7 @@ def test_all():
                mf_meg_origin,
                mf_head_origin)
     for ii, rf in enumerate(raw_fnames):
-        raw = Raw(rf, allow_maxshield='yes').crop(0., 1., copy=False)
+        raw = Raw(rf, allow_maxshield='yes').crop(0., 1.)
         with warnings.catch_warnings(record=True):  # head fit off-center
             sss_py = maxwell_filter(
                 raw, calibration=fine_cals[ii], cross_talk=ctcs[ii],
@@ -855,5 +915,47 @@ def test_all():
                 destination=destinations[ii], origin=origins[ii])
         sss_mf = Raw(sss_fnames[ii])
         assert_meg_snr(sss_py, sss_mf, mins[ii], meds[ii], msg=rf)
+
+
+@slow_test
+@requires_svd_convergence
+@testing.requires_testing_data
+def test_triux():
+    """Test TRIUX system support"""
+    raw = Raw(tri_fname).crop(0, 0.999)
+    raw.fix_mag_coil_types()
+    # standard
+    sss_py = maxwell_filter(raw, coord_frame='meg', regularize=None)
+    assert_meg_snr(sss_py, Raw(tri_sss_fname), 37, 700)
+    # cross-talk
+    sss_py = maxwell_filter(raw, coord_frame='meg', regularize=None,
+                            cross_talk=tri_ctc_fname)
+    assert_meg_snr(sss_py, Raw(tri_sss_ctc_fname), 35, 700)
+    # fine cal
+    sss_py = maxwell_filter(raw, coord_frame='meg', regularize=None,
+                            calibration=tri_cal_fname)
+    assert_meg_snr(sss_py, Raw(tri_sss_cal_fname), 31, 360)
+    # ctc+cal
+    sss_py = maxwell_filter(raw, coord_frame='meg', regularize=None,
+                            calibration=tri_cal_fname,
+                            cross_talk=tri_ctc_fname)
+    assert_meg_snr(sss_py, Raw(tri_sss_ctc_cal_fname), 31, 350)
+    # regularization
+    sss_py = maxwell_filter(raw, coord_frame='meg', regularize='in')
+    sss_mf = Raw(tri_sss_reg_fname)
+    assert_meg_snr(sss_py, sss_mf, 0.6, 9)
+    _check_reg_match(sss_py, sss_mf, 1)
+    # all three
+    sss_py = maxwell_filter(raw, coord_frame='meg', regularize='in',
+                            calibration=tri_cal_fname,
+                            cross_talk=tri_ctc_fname)
+    sss_mf = Raw(tri_sss_ctc_cal_reg_in_fname)
+    assert_meg_snr(sss_py, sss_mf, 0.6, 9)
+    _check_reg_match(sss_py, sss_mf, 1)
+    # tSSS
+    raw = Raw(tri_fname).fix_mag_coil_types()
+    sss_py = maxwell_filter(raw, coord_frame='meg', regularize=None,
+                            st_duration=4., verbose=True)
+    assert_meg_snr(sss_py, Raw(tri_sss_st4_fname), 700., 1600)
 
 run_tests_if_main()

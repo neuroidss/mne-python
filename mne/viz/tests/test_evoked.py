@@ -38,7 +38,7 @@ layout = read_layout('Vectorview-all')
 
 
 def _get_raw():
-    return io.Raw(raw_fname, preload=False)
+    return io.read_raw_fif(raw_fname, preload=False)
 
 
 def _get_events():
@@ -52,13 +52,15 @@ def _get_picks(raw):
 
 def _get_epochs():
     raw = _get_raw()
+    raw.add_proj([], remove_existing=True)
     events = _get_events()
     picks = _get_picks(raw)
     # Use a subset of channels for plotting speed
     picks = picks[np.round(np.linspace(0, len(picks) - 1, n_chan)).astype(int)]
     picks[0] = 2  # make sure we have a magnetometer
-    epochs = Epochs(raw, events[:5], event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0))
+    with warnings.catch_warnings(record=True):  # proj
+        epochs = Epochs(raw, events[:5], event_id, tmin, tmax, picks=picks,
+                        baseline=(None, 0))
     epochs.info['bads'] = [epochs.ch_names[-1]]
     return epochs
 
@@ -89,9 +91,10 @@ def test_plot_evoked():
                     [line.get_xdata()[0], line.get_ydata()[0]], 'data')
         _fake_click(fig, ax,
                     [ax.get_xlim()[0], ax.get_ylim()[1]], 'data')
-        # plot with bad channels excluded & spatial_colors
+        # plot with bad channels excluded & spatial_colors & zorder
         evoked.plot(exclude='bads')
-        evoked.plot(exclude=evoked.info['bads'], spatial_colors=True, gfp=True)
+        evoked.plot(exclude=evoked.info['bads'], spatial_colors=True, gfp=True,
+                    zorder='std')
 
         # test selective updating of dict keys is working.
         evoked.plot(hline=[1], units=dict(mag='femto foo'))
@@ -113,12 +116,12 @@ def test_plot_evoked():
 
         evoked.plot_image(proj=True)
         # plot with bad channels excluded
-        evoked.plot_image(exclude='bads')
+        evoked.plot_image(exclude='bads', cmap='interactive')
         evoked.plot_image(exclude=evoked.info['bads'])  # does the same thing
         plt.close('all')
 
         evoked.plot_topo()  # should auto-find layout
-        _butterfly_onselect(0, 200, ['mag'], evoked)  # test averaged topomap
+        _butterfly_onselect(0, 200, ['mag', 'grad'], evoked)
         plt.close('all')
 
         cov = read_cov(cov_fname)
@@ -132,5 +135,7 @@ def test_plot_evoked():
         evoked_sss.plot_white(cov)
         evoked_sss.plot_white(cov_fname)
         plt.close('all')
+    evoked.plot_sensors()  # Test plot_sensors
+    plt.close('all')
 
 run_tests_if_main()

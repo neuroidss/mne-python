@@ -197,6 +197,8 @@ class FieldTripClient(object):
                 this_info['unit_mul'] = 0
 
                 info['chs'].append(this_info)
+                info._update_redundant()
+                info._check_consistency()
 
         else:
 
@@ -256,7 +258,9 @@ class FieldTripClient(object):
         # create epoch from data
         info = self.info
         if picks is not None:
-            info = pick_info(info, picks, copy=True)
+            info = pick_info(info, picks)
+        else:
+            picks = range(info['nchan'])
         epoch = EpochsArray(data[picks][np.newaxis], info, events)
 
         return epoch

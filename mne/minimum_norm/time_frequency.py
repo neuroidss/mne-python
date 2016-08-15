@@ -91,13 +91,11 @@ def source_band_induced_power(epochs, inverse_operator, bands, label=None,
     decim : int
         Temporal decimation factor.
     baseline : None (default) or tuple of length 2
-        The time interval to apply baseline correction.
-        If None do not apply it. If baseline is (a, b)
-        the interval is between "a (s)" and "b (s)".
-        If a is None the beginning of the data is used
-        and if b is None then b is set to the end of the interval.
-        If baseline is equal ot (None, None) all the time
-        interval is used.
+        The time interval to apply baseline correction. If None do not apply
+        it. If baseline is (a, b) the interval is between "a (s)" and "b (s)".
+        If a is None the beginning of the data is used and if b is None then b
+        is set to the end of the interval. If baseline is equal to (None, None)
+        all the time interval is used.
     baseline_mode : None | 'logratio' | 'zscore'
         Do baseline correction with ratio (power is divided by mean
         power during baseline) or zscore (power is divided by standard
@@ -105,7 +103,7 @@ def source_band_induced_power(epochs, inverse_operator, bands, label=None,
         power = [power - mean(power_baseline)] / std(power_baseline)).
     pca : bool
         If True, the true dimension of data is estimated before running
-        the time frequency transforms. It reduces the computation times
+        the time-frequency transforms. It reduces the computation times
         e.g. with a dataset that was maxfiltered (true dim is 64).
     n_jobs : int
         Number of jobs to run in parallel.
@@ -343,7 +341,7 @@ def source_induced_power(epochs, inverse_operator, frequencies, label=None,
         power = [power - mean(power_baseline)] / std(power_baseline)).
     pca : bool
         If True, the true dimension of data is estimated before running
-        the time frequency transforms. It reduces the computation times
+        the time-frequency transforms. It reduces the computation times
         e.g. with a dataset that was maxfiltered (true dim is 64).
     n_jobs : int
         Number of jobs to run in parallel.
@@ -370,7 +368,6 @@ def source_induced_power(epochs, inverse_operator, frequencies, label=None,
     # Run baseline correction
     power = rescale(power, epochs.times[::decim], baseline, baseline_mode,
                     copy=False)
-
     return power, plv
 
 
@@ -416,7 +413,7 @@ def compute_source_psd(raw, inverse_operator, lambda2=1. / 9., method="dSPM",
         The number of averages used to scale the noise covariance matrix.
     pca: bool
         If True, the true dimension of data is estimated before running
-        the time frequency transforms. It reduces the computation times
+        the time-frequency transforms. It reduces the computation times
         e.g. with a dataset that was maxfiltered (true dim is 64).
     prepared : bool
         If True, do not call `prepare_inverse_operator`.
@@ -633,7 +630,7 @@ def compute_source_psd_epochs(epochs, inverse_operator, lambda2=1. / 9.,
         The number of averages used to scale the noise covariance matrix.
     pca : bool
         If True, the true dimension of data is estimated before running
-        the time frequency transforms. It reduces the computation times
+        the time-frequency transforms. It reduces the computation times
         e.g. with a dataset that was maxfiltered (true dim is 64).
     inv_split : int or None
         Split inverse operator into inv_split parts in order to save memory.

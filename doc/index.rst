@@ -1,5 +1,7 @@
 .. title:: MNE
 
+.. include:: links.inc
+
 .. raw:: html
 
     <div class="container"><div class="row">
@@ -21,7 +23,8 @@
 
 MNE is a community-driven software package designed for **processing
 electroencephalography (EEG) and magnetoencephalography (MEG) data**
-providing comprehensive tools and workflows for:
+providing comprehensive tools and workflows for
+(:ref:`among other things <what_can_you_do>`):
 
 1. Preprocessing and denoising
 2. Source estimation
@@ -31,16 +34,15 @@ providing comprehensive tools and workflows for:
 6. Applying machine learning algorithms
 7. Visualization of sensor- and source-space data
 
-MNE includes a comprehensive `Python <https://www.python.org/>`_ package
-supplemented by tools compiled from C code for the LINUX and Mac OSX
-operating systems, as well as a MATLAB toolbox.
+MNE includes a comprehensive Python_ package supplemented by tools compiled
+from C code for the LINUX and Mac OSX operating systems, as well as a MATLAB toolbox.
 
-**From raw data to source estimates in about 30 lines of code (:ref:`try it yourself! <getting_started>`_):**
+**From raw data to source estimates in about 30 lines of code** (:ref:`try it yourself! <getting_started>`):
 
 .. code:: python
 
     >>> import mne  # doctest: +SKIP
-    >>> raw = mne.io.Raw('raw.fif', preload=True)  # load data  # doctest: +SKIP
+    >>> raw = mne.io.read_raw_fif('raw.fif', preload=True)  # load data  # doctest: +SKIP
     >>> raw.info['bads'] = ['MEG 2443', 'EEG 053']  # mark bad channels  # doctest: +SKIP
     >>> raw.filter(l_freq=None, h_freq=40.0)  # low-pass filter data  # doctest: +SKIP
     >>> # Extract epochs and save them:
@@ -122,7 +124,7 @@ Direct financial support for the project has been provided by:
 
    <h2>Community</h2>
 
-* `Analysis talk: join the MNE mailing list <http://mail.nmr.mgh.harvard.edu/mailman/listinfo/mne_analysis>`_
+* Analysis talk: join the `MNE mailing list`_
 
 * `Feature requests and bug reports on GitHub <https://github.com/mne-tools/mne-python/issues/>`_
 

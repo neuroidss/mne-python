@@ -25,15 +25,15 @@ from ..io.tree import dir_tree_find
 from ..io.tag import find_tag, read_tag
 from ..io.matrix import (_read_named_matrix, _transpose_named_matrix,
                          write_named_matrix)
-from ..io.meas_info import read_bad_channels
+from ..io.meas_info import read_bad_channels, write_info
 from ..io.pick import (pick_channels_forward, pick_info, pick_channels,
                        pick_types)
 from ..io.write import (write_int, start_block, end_block,
                         write_coord_trans, write_ch_info, write_name_list,
                         write_string, start_file, end_file, write_id)
 from ..io.base import _BaseRaw
-from ..evoked import Evoked, write_evokeds, EvokedArray
-from ..epochs import Epochs, _BaseEpochs
+from ..evoked import Evoked, EvokedArray
+from ..epochs import _BaseEpochs
 from ..source_space import (_read_source_spaces_from_tree,
                             find_source_space_hemi,
                             _write_source_spaces_to_fid)
@@ -41,22 +41,25 @@ from ..source_estimate import VolSourceEstimate
 from ..transforms import (transform_surface_to, invert_transform,
                           write_trans)
 from ..utils import (_check_fname, get_subjects_dir, has_mne_c, warn,
-                     run_subprocess, check_fname, logger, verbose)
+                     run_subprocess, check_fname, logger, verbose, deprecated)
 from ..label import Label
 
 
 class Forward(dict):
     """Forward class to represent info from forward solution
     """
+    def copy(self):
+        """Copy the Forward instance"""
+        return Forward(deepcopy(self))
 
     def __repr__(self):
         """Summarize forward info instead of printing all"""
 
         entr = '<Forward'
 
-        nchan = len(pick_types(self['info'], meg=True, eeg=False))
+        nchan = len(pick_types(self['info'], meg=True, eeg=False, exclude=[]))
         entr += ' | ' + 'MEG channels: %d' % nchan
-        nchan = len(pick_types(self['info'], meg=False, eeg=True))
+        nchan = len(pick_types(self['info'], meg=False, eeg=True, exclude=[]))
         entr += ' | ' + 'EEG channels: %d' % nchan
 
         src_types = np.array([src['type'] for src in self['src']])
@@ -94,6 +97,8 @@ class Forward(dict):
         return entr
 
 
+@deprecated("it will be removed in mne 0.14; use mne.make_bem_solution() "
+            "instead.")
 def prepare_bem_model(bem, sol_fname=None, method='linear'):
     """Wrapper for the mne_prepare_bem_model command line utility
 
@@ -238,8 +243,8 @@ def _read_one(fid, node):
                                 FIFF.FIFF_NCHAN)
     try:
         one['sol'] = _read_named_matrix(fid, node,
-                                        FIFF.FIFF_MNE_FORWARD_SOLUTION)
-        one['sol'] = _transpose_named_matrix(one['sol'], copy=False)
+                                        FIFF.FIFF_MNE_FORWARD_SOLUTION,
+                                        transpose=True)
         one['_orig_sol'] = one['sol']['data'].copy()
     except Exception:
         logger.error('Forward solution data not found')
@@ -247,8 +252,8 @@ def _read_one(fid, node):
 
     try:
         fwd_type = FIFF.FIFF_MNE_FORWARD_SOLUTION_GRAD
-        one['sol_grad'] = _read_named_matrix(fid, node, fwd_type)
-        one['sol_grad'] = _transpose_named_matrix(one['sol_grad'], copy=False)
+        one['sol_grad'] = _read_named_matrix(fid, node, fwd_type,
+                                             transpose=True)
         one['_orig_sol_grad'] = one['sol_grad']['data'].copy()
     except Exception:
         one['sol_grad'] = None
@@ -280,7 +285,7 @@ def _read_forward_meas_info(tree, fid):
 
     Returns
     -------
-    info : instance of mne.io.meas_info.Info
+    info : instance of Info
         The measurement info.
     """
     # This function assumes fid is being used as a context manager
@@ -317,6 +322,7 @@ def _read_forward_meas_info(tree, fid):
             tag = read_tag(fid, pos)
             chs.append(tag.data)
     info['chs'] = chs
+    info._update_redundant()
 
     #   Get the MRI <-> head coordinate transformation
     tag = find_tag(fid, parent_mri, FIFF.FIFF_COORD_TRANS)
@@ -571,25 +577,24 @@ def convert_forward_solution(fwd, surf_ori=False, force_fixed=False,
 
     Parameters
     ----------
-    fwd : dict
+    fwd : Forward
         The forward solution to modify.
     surf_ori : bool, optional (default False)
         Use surface-based source coordinate system? Note that force_fixed=True
         implies surf_ori=True.
     force_fixed : bool, optional (default False)
         Force fixed source orientation mode?
-    copy : bool, optional (default True)
-        If False, operation will be done in-place (modifying the input).
+    copy : bool
+        Whether to return a new instance or modify in place.
     verbose : bool, str, int, or None
         If not None, override default verbose level (see mne.verbose).
 
     Returns
     -------
-    fwd : dict
+    fwd : Forward
         The modified forward solution.
     """
-    if copy is True:
-        fwd = deepcopy(fwd)
+    fwd = fwd.copy() if copy else fwd
 
     # We need to change these entries (only):
     # 1. source_nn
@@ -689,7 +694,7 @@ def write_forward_solution(fname, fwd, overwrite=False, verbose=None):
     fname : str
         File name to save the forward solution to. It should end with -fwd.fif
         or -fwd.fif.gz.
-    fwd : dict
+    fwd : Forward
         Forward solution.
     overwrite : bool
         If True, overwrite destination file (if it exists).
@@ -786,7 +791,7 @@ def write_forward_solution(fname, fwd, overwrite=False, verbose=None):
     if n_meg > 0:
         meg_solution = dict(data=sol[picks_meg], nrow=n_meg, ncol=n_col,
                             row_names=row_names_meg, col_names=[])
-        meg_solution = _transpose_named_matrix(meg_solution, copy=False)
+        _transpose_named_matrix(meg_solution)
         start_block(fid, FIFF.FIFFB_MNE_FORWARD_SOLUTION)
         write_int(fid, FIFF.FIFF_MNE_INCLUDED_METHODS, FIFF.FIFFV_MNE_MEG)
         write_int(fid, FIFF.FIFF_MNE_COORD_FRAME, fwd['coord_frame'])
@@ -798,8 +803,7 @@ def write_forward_solution(fname, fwd, overwrite=False, verbose=None):
             meg_solution_grad = dict(data=sol_grad[picks_meg],
                                      nrow=n_meg, ncol=n_col * 3,
                                      row_names=row_names_meg, col_names=[])
-            meg_solution_grad = _transpose_named_matrix(meg_solution_grad,
-                                                        copy=False)
+            _transpose_named_matrix(meg_solution_grad)
             write_named_matrix(fid, FIFF.FIFF_MNE_FORWARD_SOLUTION_GRAD,
                                meg_solution_grad)
         end_block(fid, FIFF.FIFFB_MNE_FORWARD_SOLUTION)
@@ -810,7 +814,7 @@ def write_forward_solution(fname, fwd, overwrite=False, verbose=None):
     if n_eeg > 0:
         eeg_solution = dict(data=sol[picks_eeg], nrow=n_eeg, ncol=n_col,
                             row_names=row_names_eeg, col_names=[])
-        eeg_solution = _transpose_named_matrix(eeg_solution, copy=False)
+        _transpose_named_matrix(eeg_solution)
         start_block(fid, FIFF.FIFFB_MNE_FORWARD_SOLUTION)
         write_int(fid, FIFF.FIFF_MNE_INCLUDED_METHODS, FIFF.FIFFV_MNE_EEG)
         write_int(fid, FIFF.FIFF_MNE_COORD_FRAME, fwd['coord_frame'])
@@ -822,8 +826,7 @@ def write_forward_solution(fname, fwd, overwrite=False, verbose=None):
             eeg_solution_grad = dict(data=sol_grad[picks_eeg],
                                      nrow=n_eeg, ncol=n_col * 3,
                                      row_names=row_names_eeg, col_names=[])
-            eeg_solution_grad = _transpose_named_matrix(eeg_solution_grad,
-                                                        copy=False)
+            _transpose_named_matrix(eeg_solution_grad)
             write_named_matrix(fid, FIFF.FIFF_MNE_FORWARD_SOLUTION_GRAD,
                                eeg_solution_grad)
         end_block(fid, FIFF.FIFFB_MNE_FORWARD_SOLUTION)
@@ -862,7 +865,7 @@ def write_forward_meas_info(fid, info):
     ----------
     fid : file id
         The file id
-    info : instance of mne.io.meas_info.Info
+    info : instance of Info
         The measurement info.
     """
     info._check_consistency()
@@ -1127,11 +1130,11 @@ def apply_forward(fwd, stc, info, start=None, stop=None,
 
     Parameters
     ----------
-    fwd : dict
+    fwd : Forward
         Forward operator to use. Has to be fixed-orientation.
     stc : SourceEstimate
         The source estimate from which the sensor space data is computed.
-    info : instance of mne.io.meas_info.Info
+    info : instance of Info
         Measurement info to generate the evoked.
     start : int, optional
         Index of first time sample (index not time is seconds).
@@ -1187,11 +1190,11 @@ def apply_forward_raw(fwd, stc, info, start=None, stop=None,
 
     Parameters
     ----------
-    fwd : dict
+    fwd : Forward
         Forward operator to use. Has to be fixed-orientation.
     stc : SourceEstimate
         The source estimate from which the sensor space data is computed.
-    info : Instance of mne.io.meas_info.Info
+    info : instance of Info
         The measurement info.
     start : int, optional
         Index of first time sample (index not time is seconds).
@@ -1237,7 +1240,7 @@ def restrict_forward_to_stc(fwd, stc):
 
     Parameters
     ----------
-    fwd : dict
+    fwd : Forward
         Forward operator.
     stc : SourceEstimate
         Source estimate.
@@ -1284,7 +1287,7 @@ def restrict_forward_to_label(fwd, labels):
 
     Parameters
     ----------
-    fwd : dict
+    fwd : Forward
         Forward operator.
     labels : label object | list
         Label object or list of label objects.
@@ -1359,13 +1362,14 @@ def restrict_forward_to_label(fwd, labels):
     return fwd_out
 
 
-@verbose
-def do_forward_solution(subject, meas, fname=None, src=None, spacing=None,
-                        mindist=None, bem=None, mri=None, trans=None,
-                        eeg=True, meg=True, fixed=False, grad=False,
-                        mricoord=False, overwrite=False, subjects_dir=None,
-                        verbose=None):
+def _do_forward_solution(subject, meas, fname=None, src=None, spacing=None,
+                         mindist=None, bem=None, mri=None, trans=None,
+                         eeg=True, meg=True, fixed=False, grad=False,
+                         mricoord=False, overwrite=False, subjects_dir=None,
+                         verbose=None):
     """Calculate a forward solution for a subject using MNE-C routines
+
+    This is kept around for testing purposes.
 
     This function wraps to mne_do_forward_solution, so the mne
     command-line tools must be installed and accessible from Python.
@@ -1428,7 +1432,7 @@ def do_forward_solution(subject, meas, fname=None, src=None, spacing=None,
 
     Returns
     -------
-    fwd : dict
+    fwd : Forward
         The generated forward solution.
     """
     if not has_mne_c():
@@ -1444,24 +1448,15 @@ def do_forward_solution(subject, meas, fname=None, src=None, spacing=None,
         raise ValueError('subject must be a string')
 
     # check for meas to exist as string, or try to make evoked
-    meas_data = None
     if isinstance(meas, string_types):
         if not op.isfile(meas):
             raise IOError('measurement file "%s" could not be found' % meas)
-    elif isinstance(meas, _BaseRaw):
-        events = np.array([[0, 0, 1]], dtype=np.int)
-        end = 1. / meas.info['sfreq']
-        meas_data = Epochs(meas, events, 1, 0, end, proj=False).average()
-    elif isinstance(meas, _BaseEpochs):
-        meas_data = meas.average()
-    elif isinstance(meas, Evoked):
-        meas_data = meas
+    elif isinstance(meas, (_BaseRaw, _BaseEpochs, Evoked)):
+        meas_file = op.join(temp_dir, 'info.fif')
+        write_info(meas_file, meas.info)
+        meas = meas_file
     else:
         raise ValueError('meas must be string, Raw, Epochs, or Evoked')
-
-    if meas_data is not None:
-        meas = op.join(temp_dir, 'evoked.fif')
-        write_evokeds(meas, meas_data)
 
     # deal with trans/mri
     if mri is not None and trans is not None:
@@ -1583,7 +1578,7 @@ def average_forward_solutions(fwds, weights=None):
 
     Parameters
     ----------
-    fwds : list of dict
+    fwds : list of Forward
         Forward solutions to average. Each entry (dict) should be a
         forward solution.
     weights : array | None
@@ -1593,7 +1588,7 @@ def average_forward_solutions(fwds, weights=None):
 
     Returns
     -------
-    fwd : dict
+    fwd : Forward
         The averaged forward solution.
     """
     # check for fwds being a list

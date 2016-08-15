@@ -12,7 +12,7 @@ import stat
 import sys
 
 from .. import __version__ as mne_version
-from ..utils import get_config, set_config, _fetch_file, logger, warn
+from ..utils import get_config, set_config, _fetch_file, logger, warn, verbose
 from ..externals.six import string_types
 from ..externals.six.moves import input
 
@@ -69,10 +69,11 @@ tutorial, e.g. for research purposes, is prohibited without written consent
 from the MEG Lab.
 
 If you reference this dataset in your publications, please:
-1) aknowledge its authors: Elizabeth Bock, Esther Florin, Francois Tadel and
-Sylvain Baillet
-2) cite Brainstorm as indicated on the website:
-http://neuroimage.usc.edu/brainstorm
+
+    1) acknowledge its authors: Elizabeth Bock, Esther Florin, Francois Tadel
+       and Sylvain Baillet, and
+    2) cite Brainstorm as indicated on the website:
+       http://neuroimage.usc.edu/brainstorm
 
 For questions, please contact Francois Tadel (francois.tadel@mcgill.ca).
 """
@@ -94,35 +95,31 @@ def _dataset_version(path, name):
 
 def _get_path(path, key, name):
     """Helper to get a dataset path"""
-    if path is None:
-        # use an intelligent guess if it's not defined
-        def_path = op.realpath(op.join(op.dirname(__file__), '..', '..',
-                                       'examples'))
-        if get_config(key) is None:
-            key = 'MNE_DATA'
-        path = get_config(key, def_path)
-
-        # use the same for all datasets
-        if not op.exists(path) or not os.access(path, os.W_OK):
-            try:
-                os.mkdir(path)
-            except OSError:
-                try:
-                    logger.info('Checking for %s data in '
-                                '"~/mne_data"...' % name)
-                    path = op.join(op.expanduser("~"), "mne_data")
-                    if not op.exists(path):
-                        logger.info("Trying to create "
-                                    "'~/mne_data' in home directory")
-                        os.mkdir(path)
-                except OSError:
-                    raise OSError("User does not have write permissions "
-                                  "at '%s', try giving the path as an "
-                                  "argument to data_path() where user has "
-                                  "write permissions, for ex:data_path"
-                                  "('/home/xyz/me2/')" % (path))
-    if not isinstance(path, string_types):
-        raise ValueError('path must be a string or None')
+    # 1. Input
+    if path is not None:
+        if not isinstance(path, string_types):
+            raise ValueError('path must be a string or None')
+        return path
+    # 2. get_config(key)
+    # 3. get_config('MNE_DATA')
+    path = get_config(key, get_config('MNE_DATA'))
+    if path is not None:
+        return path
+    # 4. ~/mne_data (but use a fake home during testing so we don't
+    #    unnecessarily create ~/mne_data)
+    logger.info('Using default location ~/mne_data for %s...' % name)
+    path = op.join(os.getenv('_MNE_FAKE_HOME_DIR',
+                             op.expanduser("~")), 'mne_data')
+    if not op.exists(path):
+        logger.info('Creating ~/mne_data')
+        try:
+            os.mkdir(path)
+        except OSError:
+            raise OSError("User does not have write permissions "
+                          "at '%s', try giving the path as an "
+                          "argument to data_path() where user has "
+                          "write permissions, for ex:data_path"
+                          "('/home/xyz/me2/')" % (path))
     return path
 
 
@@ -145,7 +142,7 @@ def _do_path_update(path, update_path, key, name):
             update_path = False
 
     if update_path is True:
-        set_config(key, path)
+        set_config(key, path, set_env=False)
     return path
 
 
@@ -167,7 +164,7 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
     path = _get_path(path, key, name)
     # To update the testing or misc dataset, push commits, then make a new
     # release on GitHub. Then update the "releases" variable:
-    releases = dict(testing='0.16', misc='0.1')
+    releases = dict(testing='0.25', misc='0.1')
     # And also update the "hashes['testing']" variable below.
 
     # To update any other dataset, update the data archive itself (upload
@@ -176,7 +173,7 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
         misc='mne-misc-data-%s.tar.gz' % releases['misc'],
         sample='MNE-sample-data-processed.tar.gz',
         somato='MNE-somato-data.tar.gz',
-        spm='MNE-spm-face.tar.bz2',
+        spm='MNE-spm-face.tar.gz',
         testing='mne-testing-data-%s.tar.gz' % releases['testing'],
         fake='foo.tgz',
     )
@@ -192,7 +189,8 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
         testing='MNE-testing-data',
     )
     urls = dict(
-        brainstorm='https://copy.com/ZTHXXFcuIZycvRoA/brainstorm/%s',
+        brainstorm='https://mne-tools.s3.amazonaws.com/datasets/'
+                   'MNE-brainstorm-data/%s',
         fake='https://github.com/mne-tools/mne-testing-data/raw/master/'
              'datasets/%s',
         misc='https://codeload.github.com/mne-tools/mne-misc-data/'
@@ -207,10 +205,10 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
         brainstorm=None,
         fake='3194e9f7b46039bb050a74f3e1ae9908',
         misc='f0708d8914cf2692fee7b6c9f105e71c',
-        sample='ccf5cbc41a3727ed02821330a07abb13',
+        sample='1d5da3a809fded1ef5734444ab5bf857',
         somato='f3e3a8441477bb5bacae1d0c6e0964fb',
-        spm='3e9e83c642136e5b720e2ecc5dcc3244',
-        testing='1f23321c65572a7b71e4902571447aa4',
+        spm='f61041e3f3f2ba0def8a2ca71592cc41',
+        testing='217aed43e361c86b622dc0363ae3cef4'
     )
     folder_origs = dict(  # not listed means None
         misc='mne-misc-data-%s' % releases['misc'],
@@ -350,3 +348,36 @@ def has_dataset(name):
     dp = _data_path(download=False, name=name, check_version=False,
                     archive_name=archive_name)
     return dp.endswith(endswith)
+
+
+@verbose
+def _download_all_example_data(verbose=True):
+    """Helper to download all datasets used in examples and tutorials"""
+    # This function is designed primarily to be used by CircleCI. It has
+    # verbose=True by default so we get nice status messages
+    # Consider adding datasets from here to CircleCI for PR-auto-build
+    from . import (sample, testing, misc, spm_face, somato, brainstorm, megsim,
+                   eegbci)
+    sample.data_path()
+    testing.data_path()
+    misc.data_path()
+    spm_face.data_path()
+    somato.data_path()
+    sys.argv += ['--accept-brainstorm-license']
+    try:
+        brainstorm.bst_raw.data_path()
+        brainstorm.bst_auditory.data_path()
+        brainstorm.bst_phantom_elekta.data_path()
+        brainstorm.bst_phantom_ctf.data_path()
+    finally:
+        sys.argv.pop(-1)
+    megsim.load_data(condition='visual', data_format='single-trial',
+                     data_type='simulation', update_path=True)
+    megsim.load_data(condition='visual', data_format='raw',
+                     data_type='experimental', update_path=True)
+    megsim.load_data(condition='visual', data_format='evoked',
+                     data_type='simulation', update_path=True)
+    url_root = 'http://www.physionet.org/physiobank/database/eegmmidb/'
+    eegbci.data_path(url_root + 'S001/S001R06.edf', update_path=True)
+    eegbci.data_path(url_root + 'S001/S001R10.edf', update_path=True)
+    eegbci.data_path(url_root + 'S001/S001R14.edf', update_path=True)

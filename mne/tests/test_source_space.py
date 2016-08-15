@@ -17,7 +17,7 @@ from mne.utils import (_TempDir, requires_fs_or_nibabel, requires_nibabel,
                        requires_freesurfer, run_subprocess, slow_test,
                        requires_mne, requires_version, run_tests_if_main)
 from mne.surface import _accumulate_normals, _triangle_neighbors
-from mne.source_space import _get_mgz_header
+from mne.source_space import _get_mri_header, _get_mgz_header
 from mne.externals.six.moves import zip
 from mne.source_space import (get_volume_labels_from_aseg, SourceSpaces,
                               _compare_source_spaces)
@@ -47,9 +47,8 @@ rng = np.random.RandomState(0)
 @requires_nibabel(vox2ras_tkr=True)
 def test_mgz_header():
     """Test MGZ header reading"""
-    import nibabel as nib
     header = _get_mgz_header(fname_mri)
-    mri_hdr = nib.load(fname_mri).get_header()
+    mri_hdr = _get_mri_header(fname_mri)
     assert_allclose(mri_hdr.get_data_shape(), header['dims'])
     assert_allclose(mri_hdr.get_vox2ras_tkr(), header['vox2ras_tkr'])
     assert_allclose(mri_hdr.get_ras2vox(), header['ras2vox'])
@@ -206,6 +205,8 @@ def test_discrete_source_space():
         # now do MRI
         assert_raises(ValueError, setup_volume_source_space, 'sample',
                       pos=pos_dict, mri=fname_mri)
+        assert_equal(repr(src_new), repr(src_c))
+        assert_equal(src_new.kind, 'discrete')
     finally:
         if op.isfile(temp_name):
             os.remove(temp_name)
@@ -234,6 +235,8 @@ def test_volume_source_space():
     assert_raises(IOError, setup_volume_source_space, 'sample', temp_name,
                   pos=7.0, bem=None, surface='foo',  # bad surf
                   mri=fname_mri, subjects_dir=subjects_dir)
+    assert_equal(repr(src), repr(src_new))
+    assert_equal(src.kind, 'volume')
 
 
 @testing.requires_testing_data
@@ -255,6 +258,7 @@ def test_other_volume_source_spaces():
                                         mri=fname_mri,
                                         subjects_dir=subjects_dir)
     _compare_source_spaces(src, src_new, mode='approx')
+    assert_true('volume, shape' in repr(src))
     del src
     del src_new
     assert_raises(ValueError, setup_volume_source_space, 'sample', temp_name,
@@ -342,6 +346,8 @@ def test_setup_source_space():
                                      subjects_dir=subjects_dir, add_dist=False,
                                      overwrite=True)
     _compare_source_spaces(src, src_new, mode='approx')
+    assert_equal(repr(src), repr(src_new))
+    assert_equal(repr(src).count('surface ('), 2)
     assert_array_equal(src[0]['vertno'], np.arange(10242))
     assert_array_equal(src[1]['vertno'], np.arange(10242))
 
@@ -353,9 +359,9 @@ def test_setup_source_space():
         src_new = setup_source_space('sample', temp_name, spacing='oct6',
                                      subjects_dir=subjects_dir,
                                      overwrite=True, add_dist=False)
-    _compare_source_spaces(src, src_new, mode='approx')
+    _compare_source_spaces(src, src_new, mode='approx', nearest=False)
     src_new = read_source_spaces(temp_name)
-    _compare_source_spaces(src, src_new, mode='approx')
+    _compare_source_spaces(src, src_new, mode='approx', nearest=False)
 
     # all source points - no file writing
     src_new = setup_source_space('sample', None, spacing='all',
@@ -532,6 +538,8 @@ def test_combine_source_spaces():
     src.save(src_out_name)
     src_from_file = read_source_spaces(src_out_name)
     _compare_source_spaces(src, src_from_file, mode='approx')
+    assert_equal(repr(src), repr(src_from_file))
+    assert_equal(src.kind, 'combined')
 
     # test that all source spaces are in MRI coordinates
     coord_frames = np.array([s['coord_frame'] for s in src])
@@ -552,9 +560,9 @@ def test_combine_source_spaces():
 
     # unrecognized file type
     bad_image_fname = op.join(tempdir, 'temp-image.png')
-    with warnings.catch_warnings(record=True):  # vertices outside vol space
-        assert_raises(ValueError, src.export_volume, bad_image_fname,
-                      verbose='error')
+    # vertices outside vol space warning
+    assert_raises(ValueError, src.export_volume, bad_image_fname,
+                  verbose='error')
 
     # mixed coordinate frames
     disc3 = disc.copy()

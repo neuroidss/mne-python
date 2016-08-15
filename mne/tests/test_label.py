@@ -16,7 +16,7 @@ from mne import (read_label, stc_to_label, read_source_estimate,
                  read_source_spaces, grow_labels, read_labels_from_annot,
                  write_labels_to_annot, split_label, spatial_tris_connectivity,
                  read_surface)
-from mne.label import Label, _blend_colors
+from mne.label import Label, _blend_colors, label_sign_flip
 from mne.utils import (_TempDir, requires_sklearn, get_subjects_dir,
                        run_tests_if_main, slow_test)
 from mne.fixes import digitize, in1d, assert_is, assert_is_not
@@ -164,6 +164,14 @@ def assert_labels_equal(l0, l1, decimal=5, comment=True, color=True):
         a0 = getattr(l0, attr)
         a1 = getattr(l1, attr)
         assert_array_almost_equal(a0, a1, decimal)
+
+
+def test_copy():
+    """Test label copying"""
+    label = read_label(label_fname)
+    label_2 = label.copy()
+    label_2.pos += 1
+    assert_array_equal(label.pos, label_2.pos - 1)
 
 
 def test_label_subject():
@@ -572,12 +580,16 @@ def test_write_labels_to_annot():
                   annot_fname=fnames[0])
 
 
+@requires_sklearn
 @testing.requires_testing_data
 def test_split_label():
     """Test splitting labels"""
     aparc = read_labels_from_annot('fsaverage', 'aparc', 'lh',
                                    regexp='lingual', subjects_dir=subjects_dir)
     lingual = aparc[0]
+
+    # Test input error
+    assert_raises(ValueError, lingual.split, 'bad_input_string')
 
     # split with names
     parts = ('lingual_post', 'lingual_ant')
@@ -610,6 +622,15 @@ def test_split_label():
 
     # check default label name
     assert_equal(antmost.name, "lingual_div40-lh")
+
+    # Apply contiguous splitting to DMN label from parcellation in Yeo, 2011
+    label_default_mode = read_label(op.join(subjects_dir, 'fsaverage', 'label',
+                                            'lh.7Networks_7.label'))
+    DMN_sublabels = label_default_mode.split(parts='contiguous',
+                                             subject='fsaverage',
+                                             subjects_dir=subjects_dir)
+    assert_equal([len(label.vertices) for label in DMN_sublabels],
+                 [16181, 7022, 5965, 5300, 823] + [1] * 23)
 
 
 @slow_test
@@ -690,10 +711,8 @@ def test_morph():
         # this should throw an error because the label has all zero values
         assert_raises(ValueError, label.morph, 'sample', 'fsaverage')
         label.values.fill(1)
-        label.morph(None, 'fsaverage', 5, grade, subjects_dir, 1,
-                    copy=False)
-        label.morph('fsaverage', 'sample', 5, None, subjects_dir, 2,
-                    copy=False)
+        label = label.morph(None, 'fsaverage', 5, grade, subjects_dir, 1)
+        label = label.morph('fsaverage', 'sample', 5, None, subjects_dir, 2)
         assert_true(np.mean(in1d(label_orig.vertices, label.vertices)) == 1.0)
         assert_true(len(label.vertices) < 3 * len(label_orig.vertices))
         vals.append(label.vertices)
@@ -753,5 +772,75 @@ def test_grow_labels():
     l1 = l11 + l12
     assert_array_equal(l1.vertices, l0.vertices)
 
+
+@testing.requires_testing_data
+def test_label_sign_flip():
+    """Test label sign flip computation"""
+    src = read_source_spaces(src_fname)
+    label = Label(vertices=src[0]['vertno'][:5], hemi='lh')
+    src[0]['nn'][label.vertices] = np.array(
+        [[1., 0., 0.],
+         [0.,  1., 0.],
+         [0,  0, 1.],
+         [1. / np.sqrt(2), 1. / np.sqrt(2), 0.],
+         [1. / np.sqrt(2), 1. / np.sqrt(2), 0.]])
+    known_flips = np.array([1, 1, np.nan, 1, 1])
+    idx = [0, 1, 3, 4]  # indices that are usable (third row is orthognoal)
+    flip = label_sign_flip(label, src)
+    # Need the abs here because the direction is arbitrary
+    assert_array_almost_equal(np.abs(np.dot(flip[idx], known_flips[idx])),
+                              len(idx))
+
+
+@testing.requires_testing_data
+def test_label_center_of_mass():
+    """Test computing the center of mass of a label"""
+    stc = read_source_estimate(stc_fname)
+    stc.lh_data[:] = 0
+    vertex_stc = stc.center_of_mass('sample', subjects_dir=subjects_dir)[0]
+    assert_equal(vertex_stc, 124791)
+    label = Label(stc.vertices[1], pos=None, values=stc.rh_data.mean(axis=1),
+                  hemi='rh', subject='sample')
+    vertex_label = label.center_of_mass(subjects_dir=subjects_dir)
+    assert_equal(vertex_label, vertex_stc)
+
+    labels = read_labels_from_annot('sample', parc='aparc.a2009s',
+                                    subjects_dir=subjects_dir)
+    src = read_source_spaces(src_fname)
+    # Try a couple of random ones, one from left and one from right
+    # Visually verified in about the right place using mne_analyze
+    for label, expected in zip([labels[2], labels[3], labels[-5]],
+                               [141162, 145221, 55979]):
+        label.values[:] = -1
+        assert_raises(ValueError, label.center_of_mass,
+                      subjects_dir=subjects_dir)
+        label.values[:] = 1
+        assert_equal(label.center_of_mass(subjects_dir=subjects_dir), expected)
+        assert_equal(label.center_of_mass(subjects_dir=subjects_dir,
+                                          restrict_vertices=label.vertices),
+                     expected)
+        # restrict to source space
+        idx = 0 if label.hemi == 'lh' else 1
+        # this simple nearest version is not equivalent, but is probably
+        # close enough for many labels (including the test ones):
+        pos = label.pos[np.where(label.vertices == expected)[0][0]]
+        pos = (src[idx]['rr'][src[idx]['vertno']] - pos)
+        pos = np.argmin(np.sum(pos * pos, axis=1))
+        src_expected = src[idx]['vertno'][pos]
+        # see if we actually get the same one
+        src_restrict = np.intersect1d(label.vertices, src[idx]['vertno'])
+        assert_equal(label.center_of_mass(subjects_dir=subjects_dir,
+                                          restrict_vertices=src_restrict),
+                     src_expected)
+        assert_equal(label.center_of_mass(subjects_dir=subjects_dir,
+                                          restrict_vertices=src),
+                     src_expected)
+    # degenerate cases
+    assert_raises(ValueError, label.center_of_mass, subjects_dir=subjects_dir,
+                  restrict_vertices='foo')
+    assert_raises(TypeError, label.center_of_mass, subjects_dir=subjects_dir,
+                  surf=1)
+    assert_raises(IOError, label.center_of_mass, subjects_dir=subjects_dir,
+                  surf='foo')
 
 run_tests_if_main()

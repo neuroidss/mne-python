@@ -19,7 +19,7 @@ and above which to filter out data.
 |                   | | eeglab;                                                    | | from mne import io,     :class:`Epochs <mne.Epochs>`                      |
 |                   |                                                              | | from mne.preprocessing import     :class:`ICA <mne.preprocessing.ICA>`    |
 +-------------------+--------------------------------------------------------------+-----------------------------------------------------------------------------+
-| Import data       | EEG = pop_fileio(fname);                                     | | :func:`raw = io.Raw(fname) <mne.io.Raw>`                                  |
+| Import data       | EEG = pop_fileio(fname);                                     | | :func:`raw = io.read_raw_fif(fname) <mne.io.Raw>`                         |
 |                   |                                                              | | :func:`raw = io.read_raw_edf(fname) <mne.io.read_raw_edf>`                |
 |                   |                                                              | | :func:`raw = io.read_raw_eeglab(fname) <mne.io.read_raw_eeglab>`          |
 +-------------------+--------------------------------------------------------------+-----------------------------------------------------------------------------+
@@ -28,7 +28,7 @@ and above which to filter out data.
 | Run ICA           | EEG = pop_runica(EEG);                                       | :func:`ica.fit(raw) <mne.preprocessing.ICA.fit>`                            |
 +-------------------+--------------------------------------------------------------+-----------------------------------------------------------------------------+
 | Epoch data        | | event_id = {'cond1', 'cond2'};                             | | :func:`events = mne.find_events(raw) <mne.find_events>`                   |
-|                   | | Epochs = pop_epochs(EEG, event_id, [tmin, tmax]) ;         | | :py:class:`event_id = dict(cond1=32, cond2=64) <dict>`                    |
+|                   | | Epochs = pop_epochs(EEG, event_id, [tmin, tmax]);          | | :py:class:`event_id = dict(cond1=32, cond2=64) <dict>`                    |
 |                   | |                                                            | | :class:`epochs = Epochs(raw, events, event_id, tmin, tmax) <mne.Epochs>`  |
 +-------------------+--------------------------------------------------------------+-----------------------------------------------------------------------------+
 | Selecting epochs  | Epochs = pop_epochs(EEG_epochs, {cond2});                    | :class:`epochs[cond2] <mne.Epochs>`                                         |
@@ -47,8 +47,8 @@ Note that MNE has functions to read a variety of file formats, not just :func:`m
 Pitfalls
 --------
 
-* Python function often operate in-place. This means that the input to the function is modified.
+* Python methods often operate in-place. This means the object the method is called on is modified in-place (e.g., see the filter example above).
   This can be confusing to new users migrating from Matlab. However, it is also possible to ask MNE functions not to modify the input.
-  In this case, a copy of the input is made, which is operated upon and returned. Look out for the boolean argument ``copy`` in MNE functions.
+  To do this, call the ``copy`` method of the object (.e.g, use  :func:`raw_filtered = raw.copy().filter(l_freq, h_freq) <mne.io.Raw.copy>`).
 * The concept of channel types is critical in MNE because it supports analysis of multimodal data (e.g., EEG, MEG, EOG, Stim channel)
   whereas most EEGLAB functions assume the same channel type (EEG).

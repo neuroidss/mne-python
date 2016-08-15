@@ -13,7 +13,6 @@ import os
 import os.path as op
 
 import numpy as np
-from scipy import linalg
 
 from .constants import FIFF
 from .pick import pick_types, channel_type, pick_channels, pick_info
@@ -23,30 +22,30 @@ from .proj import setup_proj, activate_proj, _proj_equal, ProjMixin
 from ..channels.channels import (ContainsMixin, UpdateChannelsMixin,
                                  SetChannelsMixin, InterpolationMixin)
 from ..channels.montage import read_montage, _set_montage, Montage
-from .compensator import set_current_comp
+from .compensator import set_current_comp, make_compensator
 from .write import (start_file, end_file, start_block, end_block,
                     write_dau_pack16, write_float, write_double,
                     write_complex64, write_complex128, write_int,
                     write_id, write_string, write_name_list, _get_split_size)
 
-from ..filter import (low_pass_filter, high_pass_filter, band_pass_filter,
-                      notch_filter, band_stop_filter, resample,
+from ..filter import (filter_data, notch_filter, resample, next_fast_len,
                       _resample_stim_channels)
 from ..fixes import in1d
 from ..parallel import parallel_func
-from ..utils import (_check_fname, _check_pandas_installed,
-                     _check_pandas_index_arguments,
-                     check_fname, _get_stim_channel, object_hash,
-                     logger, verbose, _time_mask, warn)
+from ..utils import (_check_fname, _check_pandas_installed, sizeof_fmt,
+                     _check_pandas_index_arguments, _check_copy_dep,
+                     check_fname, _get_stim_channel,
+                     logger, verbose, _time_mask, warn, SizeMixin,
+                     copy_function_doc_to_method_doc)
 from ..viz import plot_raw, plot_raw_psd, plot_raw_psd_topo
 from ..defaults import _handle_default
 from ..externals.six import string_types
 from ..event import find_events, concatenate_events
-from ..annotations import _combine_annotations
+from ..annotations import _combine_annotations, _onset_to_seconds
 
 
 class ToDataFrameMixin(object):
-    '''Class to add to_data_frame capabilities to certain classes.'''
+    """Class to add to_data_frame capabilities to certain classes."""
     def _get_check_picks(self, picks, picks_check):
         if picks is None:
             picks = list(range(self.info['nchan']))
@@ -202,6 +201,36 @@ class ToDataFrameMixin(object):
         return df
 
 
+class TimeMixin(object):
+    """Class to add sfreq and time_as_index capabilities to certain classes."""
+
+    def time_as_index(self, times, use_rounding=False):
+        """Convert time to indices
+
+        Parameters
+        ----------
+        times : list-like | float | int
+            List of numbers or a number representing points in time.
+        use_rounding : boolean
+            If True, use rounding (instead of truncation) when converting
+            times to indices. This can help avoid non-unique indices.
+
+        Returns
+        -------
+        index : ndarray
+            Indices corresponding to the times supplied.
+        """
+        from ..source_estimate import _BaseSourceEstimate
+        if isinstance(self, _BaseSourceEstimate):
+            sfreq = 1. / self.tstep
+        else:
+            sfreq = self.info['sfreq']
+        index = (np.atleast_1d(times) - self.times[0]) * sfreq
+        if use_rounding:
+            index = np.round(index)
+        return index.astype(int)
+
+
 def _check_fun(fun, d, *args, **kwargs):
     want_shape = d.shape
     d = fun(d, *args, **kwargs)
@@ -214,7 +243,8 @@ def _check_fun(fun, d, *args, **kwargs):
 
 
 class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
-               SetChannelsMixin, InterpolationMixin, ToDataFrameMixin):
+               SetChannelsMixin, InterpolationMixin, ToDataFrameMixin,
+               TimeMixin, SizeMixin):
     """Base class for Raw data
 
     Subclasses must provide the following methods:
@@ -230,8 +260,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     def __init__(self, info, preload=False,
                  first_samps=(0,), last_samps=None,
                  filenames=(None,), raw_extras=(None,),
-                 comp=None, orig_comp_grade=None, orig_format='double',
-                 dtype=np.float64, verbose=None):
+                 orig_format='double', dtype=np.float64, verbose=None):
         # wait until the end to preload data, but triage here
         if isinstance(preload, np.ndarray):
             # some functions (e.g., filtering) only work w/64-bit data
@@ -268,8 +297,13 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         self.verbose = verbose
         self._cals = cals
         self._raw_extras = list(raw_extras)
-        self.comp = comp
-        self._orig_comp_grade = orig_comp_grade
+        # deal with compensation (only relevant for CTF data, either CTF
+        # reader or MNE-C converted CTF->FIF files)
+        self._read_comp_grade = self.compensation_grade  # read property
+        if self._read_comp_grade is not None:
+            logger.info('Current compensation grade : %d'
+                        % self._read_comp_grade)
+        self._comp = None
         self._filenames = list(filenames)
         self.orig_format = orig_format
         self._projectors = list()
@@ -280,6 +314,54 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         self._update_times()
         if load_from_disk:
             self._preload_data(preload)
+
+    @verbose
+    def apply_gradient_compensation(self, grade, verbose=None):
+        """Apply CTF gradient compensation
+
+        .. warning:: The compensation matrices are stored with single
+                     precision, so repeatedly switching between different
+                     of compensation (e.g., 0->1->3->2) can increase
+                     numerical noise, especially if data are saved to
+                     disk in between changing grades. It is thus best to
+                     only use a single gradient compensation level in
+                     final analyses.
+
+        Parameters
+        ----------
+        grade : int
+            CTF gradient compensation level.
+        verbose : bool, str, int, or None
+            If not None, override default verbose level (see mne.verbose).
+
+        Returns
+        -------
+        raw : instance of Raw
+            The modified Raw instance. Works in-place.
+        """
+        grade = int(grade)
+        current_comp = self.compensation_grade
+        if current_comp != grade:
+            if self.proj:
+                raise RuntimeError('Cannot change compensation on data where '
+                                   'projectors have been applied')
+            # Figure out what operator to use (varies depending on preload)
+            from_comp = current_comp if self.preload else self._read_comp_grade
+            comp = make_compensator(self.info, from_comp, grade)
+            logger.info('Compensator constructed to change %d -> %d'
+                        % (current_comp, grade))
+            set_current_comp(self.info, grade)
+            # We might need to apply it to our data now
+            if self.preload:
+                logger.info('Applying compensator to loaded data')
+                lims = np.concatenate([np.arange(0, len(self.times), 10000),
+                                       [len(self.times)]])
+                for start, stop in zip(lims[:-1], lims[1:]):
+                    self._data[:, start:stop] = np.dot(
+                        comp, self._data[:, start:stop])
+            else:
+                self._comp = comp  # store it for later use
+        return self
 
     @property
     def _dtype(self):
@@ -314,8 +396,6 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         -------
         data : array, [channels x samples]
            the data matrix (channels x samples).
-        times : array, [samples]
-            returns the time values corresponding to the samples.
         """
         #  Initial checks
         start = int(start)
@@ -354,12 +434,12 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
 
         # set up cals and mult (cals, compensation, and projector)
         cals = self._cals.ravel()[np.newaxis, :]
-        if self.comp is not None:
+        if self._comp is not None:
             if projector is not None:
-                mult = self.comp * cals
+                mult = self._comp * cals
                 mult = np.dot(projector[idx], mult)
             else:
-                mult = self.comp[idx] * cals
+                mult = self._comp[idx] * cals
         elif projector is not None:
             mult = projector[idx] * cals
         else:
@@ -410,6 +490,46 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         """
         raise NotImplementedError
 
+    def _check_bad_segment(self, start, stop, picks,
+                           reject_by_annotation=False):
+        """Function for checking if data segment is bad.
+
+        If the slice is good, returns the data in desired range.
+        If rejected based on annotation, returns description of the
+        bad segment as a string.
+
+        Parameters
+        ----------
+        start : int
+            First sample of the slice.
+        stop : int
+            End of the slice.
+        picks : array of int
+            Channel picks.
+        reject_by_annotation : bool
+            Whether to perform rejection based on annotations.
+            False by default.
+
+        Returns
+        -------
+        data : array | str
+            Data in the desired range (good segment) or description of the bad
+            segment.
+        """
+        if start < 0:
+            return None
+        if reject_by_annotation and self.annotations is not None:
+            annot = self.annotations
+            sfreq = self.info['sfreq']
+            onset = _onset_to_seconds(self, annot.onset)
+            overlaps = np.where(onset < stop / sfreq)
+            overlaps = np.where(onset[overlaps] + annot.duration[overlaps] >
+                                start / sfreq)
+            for descr in annot.description[overlaps]:
+                if descr.lower().startswith('bad'):
+                    return descr
+        return self[picks, start:stop][0]
+
     @verbose
     def load_data(self, verbose=None):
         """Load raw data
@@ -445,6 +565,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         self._data = self._read_segment(data_buffer=data_buffer)
         assert len(self._data) == self.info['nchan']
         self.preload = True
+        self._comp = None  # no longer needed
         self.close()
 
     def _update_times(self):
@@ -487,11 +608,6 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             self.close()
         except:
             return exception_type, exception_val, trace
-
-    def __hash__(self):
-        if not self.preload:
-            raise RuntimeError('Cannot hash raw unless preloaded')
-        return object_hash(dict(info=self.info, data=self._data))
 
     def _parse_get_set_params(self, item):
         # make sure item is a tuple
@@ -543,7 +659,41 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         return sel, start, stop
 
     def __getitem__(self, item):
-        """getting raw data content with python slicing"""
+        """Get raw data and times
+
+        Parameters
+        ----------
+        item : tuple or array-like
+            See below for use cases.
+
+        Returns
+        -------
+        data : ndarray, shape (n_channels, n_times)
+            The raw data.
+        times : ndarray, shape (n_times,)
+            The times associated with the data.
+
+        Examples
+        --------
+        Generally raw data is accessed as::
+
+            >>> data, times = raw[picks, time_slice]  # doctest: +SKIP
+
+        To get all data, you can thus do either of::
+
+            >>> data, times = raw[:]  # doctest: +SKIP
+
+        Which will be equivalent to:
+
+            >>> data, times = raw[:, :]  # doctest: +SKIP
+
+        To get only the good MEG data from 10-20 seconds, you could do::
+
+            >>> picks = mne.pick_types(raw.info, meg=True, exclude='bads')  # doctest: +SKIP
+            >>> t_idx = raw.time_as_index([10., 20.])  # doctest: +SKIP
+            >>> data, times = raw[picks, t_idx[0]:t_idx[1]]  # doctest: +SKIP
+
+        """  # noqa
         sel, start, stop = self._parse_get_set_params(item)
         if self.preload:
             data = self._data[sel, start:stop]
@@ -556,26 +706,10 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
 
     def __setitem__(self, item, value):
         """setting raw data content with python slicing"""
-        if not self.preload:
-            raise RuntimeError('Modifying data of Raw is only supported '
-                               'when preloading is used. Use preload=True '
-                               '(or string) in the constructor.')
+        _check_preload(self, 'Modifying data of Raw')
         sel, start, stop = self._parse_get_set_params(item)
         # set the data
         self._data[sel, start:stop] = value
-
-    def anonymize(self):
-        """Anonymize data
-
-        This function will remove info['subject_info'] if it exists.
-
-        Returns
-        -------
-        raw : instance of Raw
-            The raw object. Operates in place.
-        """
-        self.info._anonymize()
-        return self
 
     @verbose
     def apply_function(self, fun, picks, dtype, n_jobs, *args, **kwargs):
@@ -587,14 +721,16 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         the dtype parameter, which causes the data type used for representing
         the raw data to change.
 
-        The Raw object has to be constructed using preload=True (or string).
+        The Raw object has to have the data loaded e.g. with ``preload=True``
+        or ``self.load_data()``.
 
-        Note: If n_jobs > 1, more memory is required as "len(picks) * n_times"
-              additional time points need to be temporaily stored in memory.
+        .. note:: If n_jobs > 1, more memory is required as
+                  ``len(picks) * n_times`` additional time points need to
+                  be temporaily stored in memory.
 
-        Note: If the data type changes (dtype != None), more memory is required
-              since the original and the converted data needs to be stored in
-              memory.
+        .. note:: If the data type changes (dtype != None), more memory is
+                  required since the original and the converted data needs
+                  to be stored in memory.
 
         Parameters
         ----------
@@ -618,9 +754,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             as a member of ``kwargs``, it will be consumed and will override
             the default mne-python verbose level (see mne.verbose).
         """
-        if not self.preload:
-            raise RuntimeError('Raw data needs to be preloaded. Use '
-                               'preload=True (or string) in the constructor.')
+        _check_preload(self, 'raw.apply_function')
         if picks is None:
             picks = _pick_data_channels(self.info, exclude=[],
                                         with_ref_meg=False)
@@ -646,7 +780,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                 self._data[p, :] = data_picks_new[pp]
 
     @verbose
-    def apply_hilbert(self, picks, envelope=False, n_jobs=1, n_fft=None,
+    def apply_hilbert(self, picks, envelope=False, n_jobs=1, n_fft='',
                       verbose=None):
         """ Compute analytic signal or envelope for a subset of channels.
 
@@ -658,18 +792,19 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         channels defined in "picks" is computed, resulting in the envelope
         signal.
 
-        Note: DO NOT use envelope=True if you intend to compute an inverse
-              solution from the raw data. If you want to compute the
-              envelope in source space, use envelope=False and compute the
-              envelope after the inverse solution has been obtained.
+        .. warning: Do not use ``envelope=True`` if you intend to compute
+                    an inverse solution from the raw data. If you want to
+                    compute the envelope in source space, use
+                    ``envelope=False`` and compute the envelope after the
+                    inverse solution has been obtained.
 
-        Note: If envelope=False, more memory is required since the original
-              raw data as well as the analytic signal have temporarily to
-              be stored in memory.
+        .. note:: If envelope=False, more memory is required since the
+                  original raw data as well as the analytic signal have
+                  temporarily to be stored in memory.
 
-        Note: If n_jobs > 1 and envelope=True, more memory is required as
-              "len(picks) * n_times" additional time points need to be
-              temporaily stored in memory.
+        .. note:: If n_jobs > 1, more memory is required as
+                  ``len(picks) * n_times`` additional time points need to
+                  be temporaily stored in memory.
 
         Parameters
         ----------
@@ -679,10 +814,11 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             Compute the envelope signal of each channel.
         n_jobs: int
             Number of jobs to run in parallel.
-        n_fft : int > self.n_times | None
+        n_fft : int | None | str
             Points to use in the FFT for Hilbert transformation. The signal
             will be padded with zeros before computing Hilbert, then cut back
-            to original length. If None, n == self.n_times.
+            to original length. If None, n == self.n_times. If 'auto',
+            the next highest fast FFT length will be use.
         verbose : bool, str, int, or None
             If not None, override default verbose level (see mne.verbose).
             Defaults to self.verbose.
@@ -706,7 +842,16 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         is cut off, but it may result in a slightly different result
         (particularly around the edges). Use at your own risk.
         """
-        n_fft = self.n_times if n_fft is None else n_fft
+        if n_fft is None:
+            n_fft = len(self.times)
+        elif isinstance(n_fft, string_types):
+            if n_fft == '':
+                n_fft = len(self.times)
+                warn('n_fft is None by default in 0.13 but will change to '
+                     '"auto" in 0.14', DeprecationWarning)
+            elif n_fft == 'auto':
+                n_fft = next_fast_len(len(self.times))
+        n_fft = int(n_fft)
         if n_fft < self.n_times:
             raise ValueError("n_fft must be greater than n_times")
         if envelope is True:
@@ -717,30 +862,33 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                                 n_fft, envelope=envelope)
 
     @verbose
-    def filter(self, l_freq, h_freq, picks=None, filter_length='10s',
-               l_trans_bandwidth=0.5, h_trans_bandwidth=0.5, n_jobs=1,
-               method='fft', iir_params=None, verbose=None):
+    def filter(self, l_freq, h_freq, picks=None, filter_length='',
+               l_trans_bandwidth=None, h_trans_bandwidth=None, n_jobs=1,
+               method='fir', iir_params=None, phase='', fir_window='',
+               verbose=None):
         """Filter a subset of channels.
 
         Applies a zero-phase low-pass, high-pass, band-pass, or band-stop
-        filter to the channels selected by "picks". The data of the Raw
-        object is modified inplace.
+        filter to the channels selected by ``picks``. By default the data
+        of the Raw object is modified inplace.
 
-        The Raw object has to be constructed using preload=True (or string).
+        The Raw object has to have the data loaded e.g. with ``preload=True``
+        or ``self.load_data()``.
 
-        l_freq and h_freq are the frequencies below which and above which,
-        respectively, to filter out of the data. Thus the uses are:
+        ``l_freq`` and ``h_freq`` are the frequencies below which and above
+        which, respectively, to filter out of the data. Thus the uses are:
 
             * ``l_freq < h_freq``: band-pass filter
             * ``l_freq > h_freq``: band-stop filter
             * ``l_freq is not None and h_freq is None``: high-pass filter
             * ``l_freq is None and h_freq is not None``: low-pass filter
 
-        If n_jobs > 1, more memory is required as "len(picks) * n_times"
-        additional time points need to be temporarily stored in memory.
+        ``self.info['lowpass']`` and ``self.info['highpass']`` are only
+        updated with picks=None.
 
-        self.info['lowpass'] and self.info['highpass'] are only updated
-        with picks=None.
+        .. note:: If n_jobs > 1, more memory is required as
+                  ``len(picks) * n_times`` additional time points need to
+                  be temporaily stored in memory.
 
         Parameters
         ----------
@@ -752,125 +900,134 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         picks : array-like of int | None
             Indices of channels to filter. If None only the data (MEG/EEG)
             channels will be filtered.
-        filter_length : str (Default: '10s') | int | None
-            Length of the filter to use. If None or "len(x) < filter_length",
-            the filter length used is len(x). Otherwise, if int, overlap-add
-            filtering with a filter of the specified length in samples) is
-            used (faster for long signals). If str, a human-readable time in
-            units of "s" or "ms" (e.g., "10s" or "5500ms") will be converted
-            to the shortest power-of-two length at least that duration.
-            Not used for 'iir' filters.
-        l_trans_bandwidth : float
+        filter_length : str | int
+            Length of the FIR filter to use (if applicable):
+
+                * int: specified length in samples.
+                * 'auto' (default in 0.14): the filter length is chosen based
+                  on the size of the transition regions (6.6 times the
+                  reciprocal of the shortest transition band for
+                  fir_window='hamming').
+                * str: (default in 0.13 is "10s") a human-readable time in
+                  units of "s" or "ms" (e.g., "10s" or "5500ms") will be
+                  converted to that number of samples if ``phase="zero"``, or
+                  the shortest power-of-two length at least that duration for
+                  ``phase="zero-double"``.
+
+        l_trans_bandwidth : float | str
             Width of the transition band at the low cut-off frequency in Hz
-            (high pass or cutoff 1 in bandpass). Not used if 'order' is
-            specified in iir_params.
-        h_trans_bandwidth : float
+            (high pass or cutoff 1 in bandpass). Can be "auto"
+            (default in 0.14) to use a multiple of ``l_freq``::
+
+                min(max(l_freq * 0.25, 2), l_freq)
+
+            Only used for ``method='fir'``.
+        h_trans_bandwidth : float | str
             Width of the transition band at the high cut-off frequency in Hz
-            (low pass or cutoff 2 in bandpass). Not used if 'order' is
-            specified in iir_params.
+            (low pass or cutoff 2 in bandpass). Can be "auto"
+            (default in 0.14) to use a multiple of ``h_freq``::
+
+                min(max(h_freq * 0.25, 2.), info['sfreq'] / 2. - h_freq)
+
+            Only used for ``method='fir'``.
         n_jobs : int | str
             Number of jobs to run in parallel. Can be 'cuda' if scikits.cuda
-            is installed properly, CUDA is initialized, and method='fft'.
+            is installed properly, CUDA is initialized, and method='fir'.
         method : str
-            'fft' will use overlap-add FIR filtering, 'iir' will use IIR
+            'fir' will use overlap-add FIR filtering, 'iir' will use IIR
             forward-backward filtering (via filtfilt).
         iir_params : dict | None
             Dictionary of parameters to use for IIR filtering.
             See mne.filter.construct_iir_filter for details. If iir_params
             is None and method="iir", 4th order Butterworth will be used.
+        phase : str
+            Phase of the filter, only used if ``method='fir'``.
+            By default, a symmetric linear-phase FIR filter is constructed.
+            If ``phase='zero'`` (default in 0.14), the delay of this filter
+            is compensated for. If ``phase=='zero-double'`` (default in 0.13
+            and before), then this filter is applied twice, once forward, and
+            once backward.
+
+            .. versionadded:: 0.13
+
+        fir_window : str
+            The window to use in FIR design, can be "hamming" (default in
+            0.14), "hann" (default in 0.13), or "blackman".
+
+            .. versionadded:: 0.13
+
         verbose : bool, str, int, or None
             If not None, override default verbose level (see mne.verbose).
             Defaults to self.verbose.
 
+        Returns
+        -------
+        raw : instance of Raw
+            The raw instance with filtered data.
+
         See Also
         --------
         mne.Epochs.savgol_filter
-        """
-        if verbose is None:
-            verbose = self.verbose
-        fs = float(self.info['sfreq'])
-        if l_freq == 0:
-            l_freq = None
-        if h_freq is not None and h_freq > (fs / 2.):
-            h_freq = None
-        if l_freq is not None and not isinstance(l_freq, float):
-            l_freq = float(l_freq)
-        if h_freq is not None and not isinstance(h_freq, float):
-            h_freq = float(h_freq)
+        mne.io.Raw.notch_filter
+        mne.io.Raw.resample
+        mne.filter.filter_data
 
-        if not self.preload:
-            raise RuntimeError('Raw data needs to be preloaded to filter. Use '
-                               'preload=True (or string) in the constructor.')
+        Notes
+        -----
+        For more information, see the tutorials :ref:`tut_background_filtering`
+        and :ref:`tut_artifacts_filter`.
+        """
+        _check_preload(self, 'raw.filter')
+        data_picks = _pick_data_or_ica(self.info)
+        update_info = False
         if picks is None:
-            picks = _pick_data_or_ica(self.info)
+            picks = data_picks
+            update_info = True
             # let's be safe.
-            if len(picks) < 1:
+            if len(picks) == 0:
                 raise RuntimeError('Could not find any valid channels for '
                                    'your Raw object. Please contact the '
                                    'MNE-Python developers.')
-
-            # update info if filter is applied to all data channels,
-            # and it's not a band-stop filter
-            if h_freq is not None:
-                if (l_freq is None or l_freq < h_freq) and \
-                   (self.info["lowpass"] is None or
-                   h_freq < self.info['lowpass']):
-                        self.info['lowpass'] = h_freq
-            if l_freq is not None:
-                if (h_freq is None or l_freq < h_freq) and \
-                   (self.info["highpass"] is None or
-                   l_freq > self.info['highpass']):
-                        self.info['highpass'] = l_freq
-        if l_freq is None and h_freq is not None:
-            logger.info('Low-pass filtering at %0.2g Hz' % h_freq)
-            low_pass_filter(self._data, fs, h_freq,
-                            filter_length=filter_length,
-                            trans_bandwidth=h_trans_bandwidth, method=method,
-                            iir_params=iir_params, picks=picks, n_jobs=n_jobs,
-                            copy=False)
-        if l_freq is not None and h_freq is None:
-            logger.info('High-pass filtering at %0.2g Hz' % l_freq)
-            high_pass_filter(self._data, fs, l_freq,
-                             filter_length=filter_length,
-                             trans_bandwidth=l_trans_bandwidth, method=method,
-                             iir_params=iir_params, picks=picks, n_jobs=n_jobs,
-                             copy=False)
-        if l_freq is not None and h_freq is not None:
-            if l_freq < h_freq:
-                logger.info('Band-pass filtering from %0.2g - %0.2g Hz'
-                            % (l_freq, h_freq))
-                self._data = band_pass_filter(
-                    self._data, fs, l_freq, h_freq,
-                    filter_length=filter_length,
-                    l_trans_bandwidth=l_trans_bandwidth,
-                    h_trans_bandwidth=h_trans_bandwidth,
-                    method=method, iir_params=iir_params, picks=picks,
-                    n_jobs=n_jobs, copy=False)
+        elif h_freq is not None or l_freq is not None:
+            if in1d(data_picks, picks).all():
+                update_info = True
             else:
-                logger.info('Band-stop filtering from %0.2g - %0.2g Hz'
-                            % (h_freq, l_freq))
-                self._data = band_stop_filter(
-                    self._data, fs, h_freq, l_freq,
-                    filter_length=filter_length,
-                    l_trans_bandwidth=h_trans_bandwidth,
-                    h_trans_bandwidth=l_trans_bandwidth, method=method,
-                    iir_params=iir_params, picks=picks, n_jobs=n_jobs,
-                    copy=False)
+                logger.info('Filtering a subset of channels. The highpass and '
+                            'lowpass values in the measurement info will not '
+                            'be updated.')
+        filter_data(self._data, self.info['sfreq'], l_freq, h_freq, picks,
+                    filter_length, l_trans_bandwidth, h_trans_bandwidth,
+                    n_jobs, method, iir_params, copy=False, phase=phase,
+                    fir_window=fir_window)
+        # update info if filter is applied to all data channels,
+        # and it's not a band-stop filter
+        if update_info:
+            if h_freq is not None and (l_freq is None or l_freq < h_freq) and \
+                    (self.info["lowpass"] is None or
+                     h_freq < self.info['lowpass']):
+                self.info['lowpass'] = float(h_freq)
+            if l_freq is not None and (h_freq is None or l_freq < h_freq) and \
+                    (self.info["highpass"] is None or
+                     l_freq > self.info['highpass']):
+                self.info['highpass'] = float(l_freq)
+        return self
 
     @verbose
-    def notch_filter(self, freqs, picks=None, filter_length='10s',
+    def notch_filter(self, freqs, picks=None, filter_length='',
                      notch_widths=None, trans_bandwidth=1.0, n_jobs=1,
-                     method='fft', iir_params=None,
-                     mt_bandwidth=None, p_value=0.05, verbose=None):
+                     method='fft', iir_params=None, mt_bandwidth=None,
+                     p_value=0.05, phase='', fir_window='', verbose=None):
         """Notch filter a subset of channels.
 
         Applies a zero-phase notch filter to the channels selected by
-        "picks". The data of the Raw object is modified inplace.
+        "picks". By default the data of the Raw object is modified inplace.
 
-        The Raw object has to be constructed using preload=True (or string).
+        The Raw object has to have the data loaded e.g. with ``preload=True``
+        or ``self.load_data()``.
 
-        Note: If n_jobs > 1, more memory is required as "len(picks) * n_times"
-              additional time points need to be temporaily stored in memory.
+        .. note:: If n_jobs > 1, more memory is required as
+                  ``len(picks) * n_times`` additional time points need to
+                  be temporaily stored in memory.
 
         Parameters
         ----------
@@ -882,24 +1039,31 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         picks : array-like of int | None
             Indices of channels to filter. If None only the data (MEG/EEG)
             channels will be filtered.
-        filter_length : str (Default: '10s') | int | None
-            Length of the filter to use. If None or "len(x) < filter_length",
-            the filter length used is len(x). Otherwise, if int, overlap-add
-            filtering with a filter of the specified length in samples) is
-            used (faster for long signals). If str, a human-readable time in
-            units of "s" or "ms" (e.g., "10s" or "5500ms") will be converted
-            to the shortest power-of-two length at least that duration.
-            Not used for 'iir' filters.
+        filter_length : str | int
+            Length of the FIR filter to use (if applicable):
+
+                * int: specified length in samples.
+                * 'auto' (default in 0.14): the filter length is chosen based
+                  on the size of the transition regions (6.6 times the
+                  reciprocal of the shortest transition band for
+                  fir_window='hamming').
+                * str: (default in 0.13 is "10s") a human-readable time in
+                  units of "s" or "ms" (e.g., "10s" or "5500ms") will be
+                  converted to that number of samples if ``phase="zero"``, or
+                  the shortest power-of-two length at least that duration for
+                  ``phase="zero-double"``.
+
         notch_widths : float | array of float | None
             Width of each stop band (centred at each freq in freqs) in Hz.
             If None, freqs / 200 is used.
         trans_bandwidth : float
             Width of the transition band in Hz.
+            Only used for ``method='fir'``.
         n_jobs : int | str
             Number of jobs to run in parallel. Can be 'cuda' if scikits.cuda
-            is installed properly, CUDA is initialized, and method='fft'.
+            is installed properly, CUDA is initialized, and method='fir'.
         method : str
-            'fft' will use overlap-add FIR filtering, 'iir' will use IIR
+            'fir' will use overlap-add FIR filtering, 'iir' will use IIR
             forward-backward filtering (via filtfilt). 'spectrum_fit' will
             use multi-taper estimation of sinusoidal components.
         iir_params : dict | None
@@ -914,16 +1078,39 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             sinusoidal components to remove when method='spectrum_fit' and
             freqs=None. Note that this will be Bonferroni corrected for the
             number of frequencies, so large p-values may be justified.
+        phase : str
+            Phase of the filter, only used if ``method='fir'``.
+            By default, a symmetric linear-phase FIR filter is constructed.
+            If ``phase='zero'`` (default in 0.14), the delay of this filter
+            is compensated for. If ``phase=='zero-double'`` (default in 0.13
+            and before), then this filter is applied twice, once forward, and
+            once backward.
+
+            .. versionadded:: 0.13
+
+        fir_window : str
+            The window to use in FIR design, can be "hamming" (default in
+            0.14), "hann" (default in 0.13), or "blackman".
+
+            .. versionadded:: 0.13
+
         verbose : bool, str, int, or None
             If not None, override default verbose level (see mne.verbose).
             Defaults to self.verbose.
 
+        Returns
+        -------
+        raw : instance of Raw
+            The raw instance with filtered data.
+
+        See Also
+        --------
+        mne.io.Raw.filter
+
         Notes
         -----
-        For details, see mne.filter.notch_filter.
+        For details, see :func:`mne.filter.notch_filter`.
         """
-        if verbose is None:
-            verbose = self.verbose
         fs = float(self.info['sfreq'])
         if picks is None:
             picks = _pick_data_or_ica(self.info)
@@ -932,26 +1119,22 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                 raise RuntimeError('Could not find any valid channels for '
                                    'your Raw object. Please contact the '
                                    'MNE-Python developers.')
-        if not self.preload:
-            raise RuntimeError('Raw data needs to be preloaded to filter. Use '
-                               'preload=True (or string) in the constructor.')
-
-        self._data = notch_filter(self._data, fs, freqs,
-                                  filter_length=filter_length,
-                                  notch_widths=notch_widths,
-                                  trans_bandwidth=trans_bandwidth,
-                                  method=method, iir_params=iir_params,
-                                  mt_bandwidth=mt_bandwidth, p_value=p_value,
-                                  picks=picks, n_jobs=n_jobs, copy=False)
+        _check_preload(self, 'raw.notch_filter')
+        self._data = notch_filter(
+            self._data, fs, freqs, filter_length=filter_length,
+            notch_widths=notch_widths, trans_bandwidth=trans_bandwidth,
+            method=method, iir_params=iir_params, mt_bandwidth=mt_bandwidth,
+            p_value=p_value, picks=picks, n_jobs=n_jobs, copy=False,
+            phase=phase, fir_window=fir_window)
+        return self
 
     @verbose
-    def resample(self, sfreq, npad=None, window='boxcar', stim_picks=None,
-                 n_jobs=1, events=None, copy=False, verbose=None):
-        """Resample data channels.
+    def resample(self, sfreq, npad='auto', window='boxcar', stim_picks=None,
+                 n_jobs=1, events=None, copy=None, verbose=None):
+        """Resample all channels.
 
-        Resamples all channels.
-
-        The Raw object has to be constructed using preload=True (or string).
+        The Raw object has to have the data loaded e.g. with ``preload=True``
+        or ``self.load_data()``.
 
         .. warning:: The intended purpose of this function is primarily to
                      speed up computations (e.g., projection calculation) when
@@ -960,9 +1143,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                      generally recommended not to epoch downsampled data,
                      but instead epoch and then downsample, as epoching
                      downsampled data jitters triggers.
-                     See here for an example:
-
-                         https://gist.github.com/Eric89GXL/01642cb3789992fbca59
+                     For more, see
+                     `this illustrative gist <https://gist.github.com/Eric89GXL/01642cb3789992fbca59>`_.
 
                      If resampling the continuous data is desired, it is
                      recommended to construct events using the original data.
@@ -978,13 +1160,14 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             Can also be "auto" to use a padding that will result in
             a power-of-two size (can be much faster).
         window : string or tuple
-            Window to use in resampling. See scipy.signal.resample.
+            Frequency-domain window to use in resampling.
+            See :func:`scipy.signal.resample`.
         stim_picks : array of int | None
             Stim channels. These channels are simply subsampled or
             supersampled (without applying any filtering). This reduces
             resampling artifacts in stim channels, but may lead to missing
             triggers. If None, stim channels are automatically chosen using
-            mne.pick_types(raw.info, meg=False, stim=True, exclude=[]).
+            :func:`mne.pick_types`.
         n_jobs : int | str
             Number of jobs to run in parallel. Can be 'cuda' if scikits.cuda
             is installed properly and CUDA is initialized.
@@ -1003,20 +1186,18 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         raw : instance of Raw
             The resampled version of the raw object.
 
+        See Also
+        --------
+        mne.io.Raw.filter
+        mne.Epochs.resample
+
         Notes
         -----
-        For some data, it may be more accurate to use npad=0 to reduce
+        For some data, it may be more accurate to use ``npad=0`` to reduce
         artifacts. This is dataset dependent -- check your data!
-        """
-        if npad is None:
-            npad = 100
-            warn('npad is currently taken to be 100, but will be changed to '
-                 '"auto" in 0.12. Please set the value explicitly.',
-                 DeprecationWarning)
-        if not self.preload:
-            raise RuntimeError('Can only resample preloaded data')
-
-        inst = self.copy() if copy else self
+        """  # noqa
+        _check_preload(self, 'raw.resample')
+        inst = _check_copy_dep(self, copy)
 
         # When no event object is supplied, some basic detection of dropped
         # events is performed to generate a warning. Finding events can fail
@@ -1046,7 +1227,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         for ri in range(len(inst._raw_lengths)):
             data_chunk = inst._data[:, offsets[ri]:offsets[ri + 1]]
             new_data.append(resample(data_chunk, sfreq, o_sfreq, npad,
-                                     n_jobs=n_jobs))
+                                     window=window, n_jobs=n_jobs))
             new_ntimes = new_data[ri].shape[1]
 
             # In empirical testing, it was faster to resample all channels
@@ -1065,6 +1246,8 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
 
         inst._data = np.concatenate(new_data, axis=1)
         inst.info['sfreq'] = sfreq
+        if inst.info.get('lowpass') is not None:
+            inst.info['lowpass'] = min(inst.info['lowpass'], sfreq / 2.)
         inst._update_times()
 
         # See the comment above why we ignore all errors here.
@@ -1091,14 +1274,13 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             )
             return inst, events
 
-    def crop(self, tmin=0.0, tmax=None, copy=True):
+    def crop(self, tmin=0.0, tmax=None, copy=None):
         """Crop raw data file.
 
         Limit the data from the raw file to go between specific times. Note
         that the new tmin is assumed to be t=0 for all subsequently called
         functions (e.g., time_as_index, or Epochs). New first_samp and
-        last_samp are set accordingly. And data are modified in-place when
-        called with copy=False.
+        last_samp are set accordingly.
 
         Parameters
         ----------
@@ -1107,14 +1289,16 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         tmax : float | None
             New end time in seconds of the data (cannot exceed data duration).
         copy : bool
-            If False Raw is cropped in place.
+            This parameter has been deprecated and will be removed in 0.14.
+            Use inst.copy() instead.
+            Whether to return a new instance or modify in place.
 
         Returns
         -------
         raw : instance of Raw
             The cropped raw object.
         """
-        raw = self.copy() if copy is True else self
+        raw = _check_copy_dep(self, copy)
         max_time = (raw.n_times - 1) / raw.info['sfreq']
         if tmax is None:
             tmax = max_time
@@ -1179,8 +1363,10 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             that only accepts raw files with buffers of the same size.
         proj : bool
             If True the data is saved with the projections applied (active).
-            Note: If apply_proj() was used to apply the projections,
-            the projectons will be active even if proj is False.
+
+            .. note:: If ``apply_proj()`` was used to apply the projections,
+                      the projectons will be active even if ``proj`` is False.
+
         fmt : str
             Format to use to save raw data. Valid options are 'double',
             'single', 'int', and 'short' for 64- or 32-bit float, or 32- or
@@ -1199,7 +1385,10 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             parameter specifies the maximum size of each piece. If the
             parameter is an integer, it specifies the size in Bytes. It is
             also possible to pass a human-readable string, e.g., 100MB.
-            Note: Due to FIFF file limitations, the maximum split size is 2GB.
+
+            .. note:: Due to FIFF file limitations, the maximum split
+                      size is 2GB.
+
         verbose : bool, str, int, or None
             If not None, override default verbose level (see mne.verbose).
             Defaults to self.verbose.
@@ -1256,12 +1445,6 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             info = self.info
             projector = None
 
-        # set the correct compensation grade and make inverse compensator
-        inv_comp = None
-        if self.comp is not None:
-            inv_comp = linalg.inv(self.comp)
-            set_current_comp(info, self._orig_comp_grade)
-
         #
         #   Set up the reading parameters
         #
@@ -1269,268 +1452,54 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         #   Convert to samples
         start = int(np.floor(tmin * self.info['sfreq']))
 
+        # "stop" is the first sample *not* to save, so we need +1's here
         if tmax is None:
-            stop = self.last_samp + 1 - self.first_samp
+            stop = np.inf
         else:
-            stop = int(np.floor(tmax * self.info['sfreq']))
+            stop = self.time_as_index(float(tmax), use_rounding=True)[0] + 1
+        stop = min(stop, self.last_samp - self.first_samp + 1)
         buffer_size = self._get_buffer_size(buffer_size_sec)
 
         # write the raw file
         _write_raw(fname, self, info, picks, fmt, data_type, reset_range,
-                   start, stop, buffer_size, projector, inv_comp,
-                   drop_small_buffer, split_size, 0, None)
+                   start, stop, buffer_size, projector, drop_small_buffer,
+                   split_size, 0, None)
 
+    @copy_function_doc_to_method_doc(plot_raw)
     def plot(self, events=None, duration=10.0, start=0.0, n_channels=20,
              bgcolor='w', color=None, bad_color=(0.8, 0.8, 0.8),
              event_color='cyan', scalings=None, remove_dc=True, order='type',
              show_options=False, title=None, show=True, block=False,
              highpass=None, lowpass=None, filtorder=4, clipping=None):
-        """Plot raw data
-
-        Parameters
-        ----------
-        events : array | None
-            Events to show with vertical bars.
-        duration : float
-            Time window (sec) to plot in a given time.
-        start : float
-            Initial time to show (can be changed dynamically once plotted).
-        n_channels : int
-            Number of channels to plot at once. Defaults to 20.
-        bgcolor : color object
-            Color of the background.
-        color : dict | color object | None
-            Color for the data traces. If None, defaults to::
-
-                dict(mag='darkblue', grad='b', eeg='k', eog='k', ecg='r',
-                     emg='k', ref_meg='steelblue', misc='k', stim='k',
-                     resp='k', chpi='k')
-
-        bad_color : color object
-            Color to make bad channels.
-        event_color : color object
-            Color to use for events.
-        scalings : dict | None
-            Scale factors for the traces. If None, defaults to::
-
-                dict(mag=1e-12, grad=4e-11, eeg=20e-6, eog=150e-6, ecg=5e-4,
-                     emg=1e-3, ref_meg=1e-12, misc=1e-3, stim=1,
-                     resp=1, chpi=1e-4)
-
-        remove_dc : bool
-            If True remove DC component when plotting data.
-        order : 'type' | 'original' | array
-            Order in which to plot data. 'type' groups by channel type,
-            'original' plots in the order of ch_names, array gives the
-            indices to use in plotting.
-        show_options : bool
-            If True, a dialog for options related to projection is shown.
-        title : str | None
-            The title of the window. If None, and either the filename of the
-            raw object or '<unknown>' will be displayed as title.
-        show : bool
-            Show figures if True
-        block : bool
-            Whether to halt program execution until the figure is closed.
-            Useful for setting bad channels on the fly (click on line).
-            May not work on all systems / platforms.
-        highpass : float | None
-            Highpass to apply when displaying data.
-        lowpass : float | None
-            Lowpass to apply when displaying data.
-        filtorder : int
-            Filtering order. Note that for efficiency and simplicity,
-            filtering during plotting uses forward-backward IIR filtering,
-            so the effective filter order will be twice ``filtorder``.
-            Filtering the lines for display may also produce some edge
-            artifacts (at the left and right edges) of the signals
-            during display. Filtering requires scipy >= 0.10.
-        clipping : str | None
-            If None, channels are allowed to exceed their designated bounds in
-            the plot. If "clamp", then values are clamped to the appropriate
-            range for display, creating step-like artifacts. If "transparent",
-            then excessive values are not shown, creating gaps in the traces.
-
-        Returns
-        -------
-        fig : Instance of matplotlib.figure.Figure
-            Raw traces.
-
-        Notes
-        -----
-        The arrow keys (up/down/left/right) can typically be used to navigate
-        between channels and time ranges, but this depends on the backend
-        matplotlib is configured to use (e.g., mpl.use('TkAgg') should work).
-        The scaling can be adjusted with - and + (or =) keys. The viewport
-        dimensions can be adjusted with page up/page down and home/end keys.
-        Full screen mode can be to toggled with f11 key. To mark or un-mark a
-        channel as bad, click on the rather flat segments of a channel's time
-        series. The changes will be reflected immediately in the raw object's
-        ``raw.info['bads']`` entry.
-        """
         return plot_raw(self, events, duration, start, n_channels, bgcolor,
                         color, bad_color, event_color, scalings, remove_dc,
                         order, show_options, title, show, block, highpass,
                         lowpass, filtorder, clipping)
 
     @verbose
+    @copy_function_doc_to_method_doc(plot_raw_psd)
     def plot_psd(self, tmin=0.0, tmax=60.0, fmin=0, fmax=np.inf,
                  proj=False, n_fft=2048, picks=None, ax=None,
                  color='black', area_mode='std', area_alpha=0.33,
                  n_overlap=0, dB=True, show=True, n_jobs=1, verbose=None):
-        """Plot the power spectral density across channels
-
-        Parameters
-        ----------
-        tmin : float
-            Start time for calculations.
-        tmax : float
-            End time for calculations.
-        fmin : float
-            Start frequency to consider.
-        fmax : float
-            End frequency to consider.
-        proj : bool
-            Apply projection.
-        n_fft : int
-            Number of points to use in Welch FFT calculations.
-        picks : array-like of int | None
-            List of channels to use. Cannot be None if `ax` is supplied. If
-            both `picks` and `ax` are None, separate subplots will be created
-            for each standard channel type (`mag`, `grad`, and `eeg`).
-        ax : instance of matplotlib Axes | None
-            Axes to plot into. If None, axes will be created.
-        color : str | tuple
-            A matplotlib-compatible color to use.
-        area_mode : str | None
-            How to plot area. If 'std', the mean +/- 1 STD (across channels)
-            will be plotted. If 'range', the min and max (across channels)
-            will be plotted. Bad channels will be excluded from these
-            calculations. If None, no area will be plotted.
-        area_alpha : float
-            Alpha for the area.
-        n_overlap : int
-            The number of points of overlap between blocks. The default value
-            is 0 (no overlap).
-        dB : bool
-            If True, transform data to decibels.
-        show : bool
-            Call pyplot.show() at the end.
-        n_jobs : int
-            Number of jobs to run in parallel.
-        verbose : bool, str, int, or None
-            If not None, override default verbose level (see mne.verbose).
-
-        Returns
-        -------
-        fig : instance of matplotlib figure
-            Figure with frequency spectra of the data channels.
-        """
         return plot_raw_psd(self, tmin=tmin, tmax=tmax, fmin=fmin, fmax=fmax,
                             proj=proj, n_fft=n_fft, picks=picks, ax=ax,
                             color=color, area_mode=area_mode,
                             area_alpha=area_alpha, n_overlap=n_overlap,
                             dB=dB, show=show, n_jobs=n_jobs)
 
+    @copy_function_doc_to_method_doc(plot_raw_psd_topo)
     def plot_psd_topo(self, tmin=0., tmax=None, fmin=0, fmax=100, proj=False,
                       n_fft=2048, n_overlap=0, layout=None, color='w',
                       fig_facecolor='k', axis_facecolor='k', dB=True,
-                      show=True, n_jobs=1, verbose=None):
-        """Function for plotting channel wise frequency spectra as topography.
-
-        Parameters
-        ----------
-        tmin : float
-            Start time for calculations. Defaults to zero.
-        tmax : float | None
-            End time for calculations. If None (default), the end of data is
-            used.
-        fmin : float
-            Start frequency to consider. Defaults to zero.
-        fmax : float
-            End frequency to consider. Defaults to 100.
-        proj : bool
-            Apply projection. Defaults to False.
-        n_fft : int
-            Number of points to use in Welch FFT calculations. Defaults to
-            2048.
-        n_overlap : int
-            The number of points of overlap between blocks. Defaults to 0
-            (no overlap).
-        layout : instance of Layout | None
-            Layout instance specifying sensor positions (does not need to
-            be specified for Neuromag data). If None (default), the correct
-            layout is inferred from the data.
-        color : str | tuple
-            A matplotlib-compatible color to use for the curves. Defaults to
-            white.
-        fig_facecolor : str | tuple
-            A matplotlib-compatible color to use for the figure background.
-            Defaults to black.
-        axis_facecolor : str | tuple
-            A matplotlib-compatible color to use for the axis background.
-            Defaults to black.
-        dB : bool
-            If True, transform data to decibels. Defaults to True.
-        show : bool
-            Show figure if True. Defaults to True.
-        n_jobs : int
-            Number of jobs to run in parallel. Defaults to 1.
-        verbose : bool, str, int, or None
-            If not None, override default verbose level (see mne.verbose).
-
-        Returns
-        -------
-        fig : instance of matplotlib figure
-            Figure distributing one image per channel across sensor topography.
-        """
+                      show=True, block=False, n_jobs=1, verbose=None):
         return plot_raw_psd_topo(self, tmin=tmin, tmax=tmax, fmin=fmin,
                                  fmax=fmax, proj=proj, n_fft=n_fft,
                                  n_overlap=n_overlap, layout=layout,
                                  color=color, fig_facecolor=fig_facecolor,
                                  axis_facecolor=axis_facecolor, dB=dB,
-                                 show=show, n_jobs=n_jobs, verbose=verbose)
-
-    def time_as_index(self, times, use_first_samp=False, use_rounding=False):
-        """Convert time to indices
-
-        Parameters
-        ----------
-        times : list-like | float | int
-            List of numbers or a number representing points in time.
-        use_first_samp : boolean
-            If True, time is treated as relative to the session onset, else
-            as relative to the recording onset.
-        use_rounding : boolean
-            If True, use rounding (instead of truncation) when converting
-            times to indicies. This can help avoid non-unique indices.
-
-        Returns
-        -------
-        index : ndarray
-            Indices corresponding to the times supplied.
-        """
-        return _time_as_index(times, self.info['sfreq'], self.first_samp,
-                              use_first_samp, use_rounding=use_rounding)
-
-    def index_as_time(self, index, use_first_samp=False):
-        """Convert indices to time
-
-        Parameters
-        ----------
-        index : list-like | int
-            List of ints or int representing points in time.
-        use_first_samp : boolean
-            If True, the time returned is relative to the session onset, else
-            relative to the recording onset.
-
-        Returns
-        -------
-        times : ndarray
-            Times corresponding to the index supplied.
-        """
-        return _index_as_time(index, self.info['sfreq'], self.first_samp,
-                              use_first_samp)
+                                 show=show, block=block, n_jobs=n_jobs,
+                                 verbose=verbose)
 
     def estimate_rank(self, tstart=0.0, tstop=30.0, tol=1e-4,
                       return_singular=False, picks=None, scalings='norm'):
@@ -1607,9 +1576,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         data = self[picks, tslice][0]
         out = _estimate_rank_meeg_signals(
             data, pick_info(self.info, picks),
-            scalings=scalings, tol=tol, return_singular=return_singular,
-            copy=False)
-
+            scalings=scalings, tol=tol, return_singular=return_singular)
         return out
 
     @property
@@ -1628,12 +1595,29 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         return self.last_samp - self.first_samp + 1
 
     def __len__(self):
+        """The number of time points
+
+        Returns
+        -------
+        len : int
+            The number of time points.
+
+        Examples
+        --------
+        This can be used as::
+
+            >>> len(raw)  # doctest: +SKIP
+            1000
+
+        """
         return self.n_times
 
     def load_bad_channels(self, bad_file=None, force=False):
         """
-        Mark channels as bad from a text file, in the style
-        (mostly) of the C function mne_mark_bad_channels
+        Mark channels as bad from a text file
+
+        This function operates mostly in the style of the C function
+        ``mne_mark_bad_channels``.
 
         Parameters
         ----------
@@ -1641,7 +1625,6 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             File name of the text file containing bad channels
             If bad_file = None, bad channels are cleared, but this
             is more easily done directly as raw.info['bads'] = [].
-
         force : boolean
             Whether or not to force bad channel marking (of those
             that exist) if channels are not found, instead of
@@ -1685,10 +1668,6 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             None, preload=True or False is inferred using the preload status
             of the raw files passed in.
         """
-        from .fiff.raw import Raw
-        from .kit.kit import RawKIT
-        from .edf.edf import RawEDF
-
         if not isinstance(raws, list):
             raws = [raws]
 
@@ -1705,9 +1684,6 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             else:
                 preload = False
 
-        if not preload and not isinstance(self, (Raw, RawKIT, RawEDF)):
-            raise RuntimeError('preload must be True to concatenate '
-                               'files unless they are FIF, KIT, or EDF')
         if preload is False:
             if self.preload:
                 self._data = None
@@ -1776,8 +1752,11 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     def __repr__(self):
         name = self._filenames[0]
         name = 'None' if name is None else op.basename(name)
-        s = ('%s, n_channels x n_times : %s x %s (%0.1f sec)'
-             % (name, len(self.ch_names), self.n_times, self.times[-1]))
+        size_str = str(sizeof_fmt(self._size))  # str in case it fails -> None
+        size_str += ', data%s loaded' % ('' if self.preload else ' not')
+        s = ('%s, n_channels x n_times : %s x %s (%0.1f sec), ~%s'
+             % (name, len(self.ch_names), self.n_times, self.times[-1],
+                size_str))
         return "<%s  |  %s>" % (self.__class__.__name__, s)
 
     def add_events(self, events, stim_channel=None):
@@ -1828,6 +1807,14 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         return int(np.ceil(buffer_size_sec * self.info['sfreq']))
 
 
+def _check_preload(raw, msg):
+    """Helper to ensure data are preloaded"""
+    if not raw.preload:
+        raise RuntimeError(msg + ' requires raw data to be loaded. Use '
+                           'preload=True (or string) in the constructor or '
+                           'raw.load_data().')
+
+
 def _allocate_data(data, data_buffer, data_shape, dtype):
     """Helper to data in memory or in memmap for preloading"""
     if data is None:
@@ -1839,45 +1826,6 @@ def _allocate_data(data, data_buffer, data_shape, dtype):
         else:
             data = np.zeros(data_shape, dtype=dtype)
     return data
-
-
-def _time_as_index(times, sfreq, first_samp=0, use_first_samp=False,
-                   use_rounding=False):
-    """Convert time to indices
-
-    Parameters
-    ----------
-    times : list-like | float | int
-        List of numbers or a number representing points in time.
-    sfreq : float | int
-        Sample frequency.
-    first_samp : int
-       Index to use as first time point.
-    use_first_samp : boolean
-        If True, time is treated as relative to the session onset, else
-        as relative to the recording onset.
-    use_rounding : boolean
-        If True, use rounding (instead of truncation) when converting times to
-        indicies. This can help avoid non-unique indices.
-
-    Returns
-    -------
-    index : ndarray
-        Indices corresponding to the times supplied.
-
-    Notes
-    -----
-    np.round will return the nearest even number for values exactly between
-        two integers.
-    """
-    index = np.atleast_1d(times) * sfreq
-    index -= (first_samp if use_first_samp else 0)
-
-    # Round or truncate time indices
-    if use_rounding:
-        return np.round(index).astype(int)
-    else:
-        return index.astype(int)
 
 
 def _index_as_time(index, sfreq, first_samp=0, use_first_samp=False):
@@ -1918,10 +1866,15 @@ class _RawShell():
 ###############################################################################
 # Writing
 def _write_raw(fname, raw, info, picks, fmt, data_type, reset_range, start,
-               stop, buffer_size, projector, inv_comp, drop_small_buffer,
+               stop, buffer_size, projector, drop_small_buffer,
                split_size, part_idx, prev_fname):
     """Write raw file with splitting
     """
+    # we've done something wrong if we hit this
+    n_times_max = len(raw.times)
+    if start >= stop or stop > n_times_max:
+        raise RuntimeError('Cannot write raw file with no data: %s -> %s '
+                           '(max: %s) requested' % (start, stop, n_times_max))
 
     if part_idx > 0:
         # insert index in filename
@@ -1932,7 +1885,8 @@ def _write_raw(fname, raw, info, picks, fmt, data_type, reset_range, start,
     logger.info('Writing %s' % use_fname)
 
     fid, cals = _start_writing_raw(use_fname, info, picks, data_type,
-                                   reset_range)
+                                   reset_range, raw.annotations)
+    use_picks = slice(None) if picks is None else picks
 
     first_samp = raw.first_samp + start
     if first_samp != 0:
@@ -1948,16 +1902,18 @@ def _write_raw(fname, raw, info, picks, fmt, data_type, reset_range, start,
         write_int(fid, FIFF.FIFF_REF_FILE_NUM, part_idx - 1)
         end_block(fid, FIFF.FIFFB_REF)
 
-    pos_prev = None
+    pos_prev = fid.tell()
+    if pos_prev > split_size:
+        raise ValueError('file is larger than "split_size" after writing '
+                         'measurement information, you must use a larger '
+                         'value for split size: %s plus enough bytes for '
+                         'the chosen buffer_size' % pos_prev)
+    next_file_buffer = 2 ** 20  # extra cushion for last few post-data tags
     for first in range(start, stop, buffer_size):
-        last = first + buffer_size
-        if last >= stop:
-            last = stop + 1
-
-        if picks is None:
-            data, times = raw[:, first:last]
-        else:
-            data, times = raw[picks, first:last]
+        # Write blocks <= buffer_size in size
+        last = min(first + buffer_size, stop)
+        data, times = raw[use_picks, first:last]
+        assert len(times) == last - first
 
         if projector is not None:
             data = np.dot(projector, data)
@@ -1968,27 +1924,30 @@ def _write_raw(fname, raw, info, picks, fmt, data_type, reset_range, start,
                         '[done]')
             break
         logger.info('Writing ...')
-
-        if pos_prev is None:
-            pos_prev = fid.tell()
-
-        _write_raw_buffer(fid, data, cals, fmt, inv_comp)
+        _write_raw_buffer(fid, data, cals, fmt)
 
         pos = fid.tell()
         this_buff_size_bytes = pos - pos_prev
-        if this_buff_size_bytes > split_size / 2:
-            raise ValueError('buffer size is too large for the given split'
-                             'size: decrease "buffer_size_sec" or increase'
-                             '"split_size".')
-        if pos > split_size:
-            warn('file is larger than "split_size"')
+        overage = pos - split_size + next_file_buffer
+        if overage > 0:
+            # This should occur on the first buffer write of the file, so
+            # we should mention the space required for the meas info
+            raise ValueError(
+                'buffer size (%s) is too large for the given split size (%s) '
+                'by %s bytes after writing info (%s) and leaving enough space '
+                'for end tags (%s): decrease "buffer_size_sec" or increase '
+                '"split_size".' % (this_buff_size_bytes, split_size, overage,
+                                   pos_prev, next_file_buffer))
 
         # Split files if necessary, leave some space for next file info
-        if pos >= split_size - this_buff_size_bytes - 2 ** 20:
+        # make sure we check to make sure we actually *need* another buffer
+        # with the "and" check
+        if pos >= split_size - this_buff_size_bytes - next_file_buffer and \
+                first + buffer_size < stop:
             next_fname, next_idx = _write_raw(
                 fname, raw, info, picks, fmt,
                 data_type, reset_range, first + buffer_size, stop, buffer_size,
-                projector, inv_comp, drop_small_buffer, split_size,
+                projector, drop_small_buffer, split_size,
                 part_idx + 1, use_fname)
 
             start_block(fid, FIFF.FIFFB_REF)
@@ -2002,18 +1961,6 @@ def _write_raw(fname, raw, info, picks, fmt, data_type, reset_range, start,
 
         pos_prev = pos
 
-    if raw.annotations is not None:
-        start_block(fid, FIFF.FIFFB_MNE_ANNOTATIONS)
-        write_float(fid, FIFF.FIFF_MNE_BASELINE_MIN, raw.annotations.onset)
-        write_float(fid, FIFF.FIFF_MNE_BASELINE_MAX,
-                    raw.annotations.duration + raw.annotations.onset)
-        # To allow : in description, they need to be replaced for serialization
-        write_name_list(fid, FIFF.FIFF_COMMENT, [d.replace(':', ';') for d in
-                                                 raw.annotations.description])
-        if raw.annotations.orig_time is not None:
-            write_double(fid, FIFF.FIFF_MEAS_DATE, raw.annotations.orig_time)
-        end_block(fid, FIFF.FIFFB_MNE_ANNOTATIONS)
-
     logger.info('Closing %s [done]' % use_fname)
     if info.get('maxshield', False):
         end_block(fid, FIFF.FIFFB_SMSH_RAW_DATA)
@@ -2025,7 +1972,7 @@ def _write_raw(fname, raw, info, picks, fmt, data_type, reset_range, start,
 
 
 def _start_writing_raw(name, info, sel=None, data_type=FIFF.FIFFT_FLOAT,
-                       reset_range=True):
+                       reset_range=True, annotations=None):
     """Start write raw data in file
 
     Data will be written in float
@@ -2043,6 +1990,8 @@ def _start_writing_raw(name, info, sel=None, data_type=FIFF.FIFFT_FLOAT,
         5 (FIFFT_DOUBLE), 16 (FIFFT_DAU_PACK16), or 3 (FIFFT_INT) for raw data.
     reset_range : bool
         If True, the info['chs'][k]['range'] parameter will be set to unity.
+    annotations : instance of Annotations or None
+        The annotations to write.
 
     Returns
     -------
@@ -2052,12 +2001,12 @@ def _start_writing_raw(name, info, sel=None, data_type=FIFF.FIFFT_FLOAT,
         calibration factors.
     """
     #
-    #    Measurement info
+    # Measurement info
     #
-    info = pick_info(info, sel, copy=True)
+    info = pick_info(info, sel)
 
     #
-    #  Create the file and save the essentials
+    # Create the file and save the essentials
     #
     fid = start_file(name)
     start_block(fid, FIFF.FIFFB_MEAS)
@@ -2078,6 +2027,21 @@ def _start_writing_raw(name, info, sel=None, data_type=FIFF.FIFFT_FLOAT,
     write_meas_info(fid, info, data_type=data_type, reset_range=reset_range)
 
     #
+    # Annotations
+    #
+    if annotations is not None:
+        start_block(fid, FIFF.FIFFB_MNE_ANNOTATIONS)
+        write_float(fid, FIFF.FIFF_MNE_BASELINE_MIN, annotations.onset)
+        write_float(fid, FIFF.FIFF_MNE_BASELINE_MAX,
+                    annotations.duration + annotations.onset)
+        # To allow : in description, they need to be replaced for serialization
+        write_name_list(fid, FIFF.FIFF_COMMENT, [d.replace(':', ';') for d in
+                                                 annotations.description])
+        if annotations.orig_time is not None:
+            write_double(fid, FIFF.FIFF_MEAS_DATE, annotations.orig_time)
+        end_block(fid, FIFF.FIFFB_MNE_ANNOTATIONS)
+
+    #
     # Start the raw data
     #
     if info.get('maxshield', False):
@@ -2088,7 +2052,7 @@ def _start_writing_raw(name, info, sel=None, data_type=FIFF.FIFFT_FLOAT,
     return fid, cals
 
 
-def _write_raw_buffer(fid, buf, cals, fmt, inv_comp):
+def _write_raw_buffer(fid, buf, cals, fmt):
     """Write raw buffer
 
     Parameters
@@ -2103,9 +2067,6 @@ def _write_raw_buffer(fid, buf, cals, fmt, inv_comp):
         'short', 'int', 'single', or 'double' for 16/32 bit int or 32/64 bit
         float for each item. This will be doubled for complex datatypes. Note
         that short and int formats cannot be used for complex data.
-    inv_comp : array | None
-        The CTF compensation matrix used to revert compensation
-        change when reading.
     """
     if buf.shape[0] != len(cals):
         raise ValueError('buffer and calibration sizes do not match')
@@ -2131,11 +2092,7 @@ def _write_raw_buffer(fid, buf, cals, fmt, inv_comp):
             raise ValueError('only "single" and "double" supported for '
                              'writing complex data')
 
-    if inv_comp is not None:
-        buf = np.dot(inv_comp / np.ravel(cals)[:, None], buf)
-    else:
-        buf = buf / np.ravel(cals)[:, None]
-
+    buf = buf / np.ravel(cals)[:, None]
     write_function(fid, FIFF.FIFF_DATA_BUFFER, buf)
 
 
@@ -2146,9 +2103,9 @@ def _my_hilbert(x, n_fft=None, envelope=False):
     ----------
     x : array, shape (n_times)
         The signal to convert
-    n_fft : int, length > x.shape[-1] | None
-        How much to pad the signal before Hilbert transform.
-        Note that signal will then be cut back to original length.
+    n_fft : int
+        Size of the FFT to perform, must be at least ``len(x)``.
+        The signal will be cut back to original length.
     envelope : bool
         Whether to compute amplitude of the hilbert transform in order
         to return the signal envelope.
@@ -2159,7 +2116,6 @@ def _my_hilbert(x, n_fft=None, envelope=False):
         The hilbert transform of the signal, or the envelope.
     """
     from scipy.signal import hilbert
-    n_fft = x.shape[-1] if n_fft is None else n_fft
     n_x = x.shape[-1]
     out = hilbert(x, N=n_fft)[:n_x]
     if envelope is True:
@@ -2252,8 +2208,8 @@ def _check_update_montage(info, montage, path=None, update_ch_names=False):
 
             # raise error if positions are missing
             if missing_positions:
-                err = ("The following positions are missing from the montage "
-                       "definitions: %s. If those channels lack positions "
-                       "because they are EOG channels use the eog parameter."
-                       % str(missing_positions))
-                raise KeyError(err)
+                raise KeyError(
+                    "The following positions are missing from the montage "
+                    "definitions: %s. If those channels lack positions "
+                    "because they are EOG channels use the eog parameter."
+                    % str(missing_positions))

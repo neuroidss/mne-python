@@ -10,6 +10,9 @@
 
 import numpy as np
 
+from ..externals.six import b
+from .constants import FIFF
+
 
 def _find_channels(ch_names, ch_type='EOG'):
     """Helper to find EOG channel.
@@ -167,3 +170,68 @@ def _read_segments_file(raw, data, idx, fi, start, stop, cals, mult,
                 block = np.vstack((block, stim_ch))
             data_view = data[:, sample_start:sample_stop]
             _mult_cal_one(data_view, block, idx, cals, mult)
+
+
+def read_str(fid, count=1):
+    """Read string from a binary file in a python version compatible way."""
+    dtype = np.dtype('>S%i' % count)
+    string = fid.read(dtype.itemsize)
+    data = np.fromstring(string, dtype=dtype)[0]
+    bytestr = b('').join([data[0:data.index(b('\x00')) if
+                          b('\x00') in data else count]])
+
+    return str(bytestr.decode('ascii'))  # Return native str type for Py2/3
+
+
+def _create_chs(ch_names, cals, ch_coil, ch_kind, eog, ecg, emg, misc):
+    """Helper for initializing info['chs'] for eeg channels."""
+    chs = list()
+    for idx, ch_name in enumerate(ch_names):
+        if ch_name in eog or idx in eog:
+            coil_type = FIFF.FIFFV_COIL_NONE
+            kind = FIFF.FIFFV_EOG_CH
+        elif ch_name in ecg or idx in ecg:
+            coil_type = FIFF.FIFFV_COIL_NONE
+            kind = FIFF.FIFFV_ECG_CH
+        elif ch_name in emg or idx in emg:
+            coil_type = FIFF.FIFFV_COIL_NONE
+            kind = FIFF.FIFFV_EMG_CH
+        elif ch_name in misc or idx in misc:
+            coil_type = FIFF.FIFFV_COIL_NONE
+            kind = FIFF.FIFFV_MISC_CH
+        else:
+            coil_type = ch_coil
+            kind = ch_kind
+
+        chan_info = {'cal': cals[idx], 'logno': idx + 1, 'scanno': idx + 1,
+                     'range': 1.0, 'unit_mul': 0., 'ch_name': ch_name,
+                     'unit': FIFF.FIFF_UNIT_V,
+                     'coord_frame': FIFF.FIFFV_COORD_HEAD,
+                     'coil_type': coil_type, 'kind': kind, 'loc': np.zeros(12)}
+        chs.append(chan_info)
+    return chs
+
+
+def _synthesize_stim_channel(events, n_samples):
+    """Synthesize a stim channel from events read from an event file
+
+    Parameters
+    ----------
+    events : array, shape (n_events, 3)
+        Each row representing an event as (onset, duration, trigger) sequence
+        (the format returned by `_read_vmrk_events` or `_read_eeglab_events`).
+    n_samples : int
+        The number of samples.
+
+    Returns
+    -------
+    stim_channel : array, shape (n_samples,)
+        An array containing the whole recording's event marking.
+    """
+    # select events overlapping buffer
+    onset = events[:, 0]
+    # create output buffer
+    stim_channel = np.zeros(n_samples, int)
+    for onset, duration, trigger in events:
+        stim_channel[onset:onset + duration] = trigger
+    return stim_channel

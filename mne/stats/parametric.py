@@ -198,11 +198,13 @@ def f_threshold_mway_rm(n_subjects, factor_levels, effects='A*B',
     effects : str
         A string denoting the effect to be returned. The following
         mapping is currently supported:
-            'A': main effect of A
-            'B': main effect of B
-            'A:B': interaction effect
-            'A+B': both main effects
-            'A*B': all three effects
+
+            * ``'A'``: main effect of A
+            * ``'B'``: main effect of B
+            * ``'A:B'``: interaction effect
+            * ``'A+B'``: both main effects
+            * ``'A*B'``: all three effects
+
     pvalue : float
         The p-value to be thresholded.
 
@@ -302,7 +304,7 @@ def f_mway_rm(data, factor_levels, effects='all', alpha=0.05,
     n_obs = data.shape[2]
     n_replications = data.shape[0]
 
-    # pute last axis in fornt to 'iterate' over mass univariate instances.
+    # put last axis in front to 'iterate' over mass univariate instances.
     data = np.rollaxis(data, 2)
     fvalues, pvalues = [], []
     for c_, df1, df2 in _iter_contrasts(n_replications, factor_levels,
@@ -323,7 +325,10 @@ def f_mway_rm(data, factor_levels, effects='all', alpha=0.05,
 
         df1, df2 = np.zeros(n_obs) + df1, np.zeros(n_obs) + df2
         if correction:
-            df1, df2 = [d[None, :] * eps for d in (df1, df2)]
+            # numerical imprecision can cause eps=0.99999999999999989
+            # even with a single category, so never let our degrees of
+            # freedom drop below 1.
+            df1, df2 = [np.maximum(d[None, :] * eps, 1.) for d in (df1, df2)]
 
         if return_pvals:
             pvals = f(df1, df2).sf(fvals)
