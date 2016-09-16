@@ -8,7 +8,7 @@ from numpy.testing import assert_array_almost_equal
 from nose.tools import assert_equal, assert_raises
 
 from mne import io, Epochs, read_events, pick_types
-from mne.utils import requires_sklearn, check_version
+from mne.utils import requires_sklearn_0_15, check_version
 from mne.decoding import compute_ems, EMS
 
 data_dir = op.join(op.dirname(__file__), '..', '..', 'io', 'tests', 'data')
@@ -21,10 +21,10 @@ tmin, tmax = -0.2, 0.5
 event_id = dict(aud_l=1, vis_l=3)
 
 
-@requires_sklearn
+@requires_sklearn_0_15
 def test_ems():
     """Test event-matched spatial filters"""
-    raw = io.read_raw_fif(raw_fname, preload=False)
+    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
 
     # create unequal number of events
     events = read_events(event_name)
@@ -33,7 +33,7 @@ def test_ems():
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True)
+                    baseline=(None, 0), preload=True, add_eeg_ref=False)
     assert_raises(ValueError, compute_ems, epochs, ['aud_l', 'vis_l'])
     epochs = epochs.equalize_event_counts(epochs.event_id, copy=False)[0]
 
@@ -44,7 +44,7 @@ def test_ems():
     events = read_events(event_name)
     event_id2 = dict(aud_l=1, aud_r=2, vis_l=3)
     epochs = Epochs(raw, events, event_id2, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True)
+                    baseline=(None, 0), preload=True, add_eeg_ref=False)
     epochs = epochs.equalize_event_counts(epochs.event_id, copy=False)[0]
 
     n_expected = sum([len(epochs[k]) for k in ['aud_l', 'vis_l']])

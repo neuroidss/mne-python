@@ -33,7 +33,6 @@ from .event import make_fixed_length_events
 from .utils import (check_fname, logger, verbose, estimate_rank,
                     _compute_row_norms, check_version, _time_mask, warn,
                     copy_function_doc_to_method_doc)
-from .fixes import in1d
 from . import viz
 
 from .externals.six.moves import zip
@@ -432,13 +431,13 @@ def compute_raw_covariance(raw, tmin=0, tmax=None, tstep=0.2, reject=None,
     if picks is None:
         # Need to include all channels e.g. if eog rejection is to be used
         picks = np.arange(raw.info['nchan'])
-        pick_mask = in1d(
+        pick_mask = np.in1d(
             picks, _pick_data_channels(raw.info, with_ref_meg=False))
     else:
         pick_mask = slice(None)
     epochs = Epochs(raw, events, 1, 0, tstep_m1, baseline=None,
                     picks=picks, reject=reject, flat=flat, verbose=False,
-                    preload=False, proj=False)
+                    preload=False, proj=False, add_eeg_ref=False)
     if method is None:
         method = 'empirical'
     if isinstance(method, string_types) and method == 'empirical':
@@ -454,8 +453,7 @@ def compute_raw_covariance(raw, tmin=0, tmax=None, tstep=0.2, reject=None,
             data += np.dot(raw_segment, raw_segment.T)
             n_samples += raw_segment.shape[1]
         _check_n_samples(n_samples, len(picks))
-        mu /= n_samples
-        data -= n_samples * mu[:, None] * mu[None, :]
+        data -= mu[:, None] * (mu[None, :] / n_samples)
         data /= (n_samples - 1.0)
         logger.info("Number of samples used : %d" % n_samples)
         logger.info('[done]')

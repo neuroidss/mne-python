@@ -9,6 +9,8 @@ from __future__ import print_function
 import atexit
 from distutils.version import LooseVersion
 from functools import wraps
+import ftplib
+from functools import partial
 import hashlib
 import inspect
 import json
@@ -24,8 +26,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import warnings
-import ftplib
 
 import numpy as np
 from scipy import linalg, sparse
@@ -34,7 +36,7 @@ from .externals.six.moves import urllib
 from .externals.six import string_types, StringIO, BytesIO
 from .externals.decorator import decorator
 
-from .fixes import _get_args, partial
+from .fixes import _get_args
 
 logger = logging.getLogger('mne')  # one selection here used across mne-python
 logger.propagate = False  # don't propagate (in case of multiple imports)
@@ -68,6 +70,17 @@ _doc_special_members = ('__contains__', '__getitem__', '__iter__', '__len__',
 
 ###############################################################################
 # RANDOM UTILITIES
+
+
+def _explain_exception(start=-1, stop=None, prefix='> '):
+    """Explain an exception."""
+    # start=-1 means "only the most recent caller"
+    etype, value, tb = sys.exc_info()
+    string = traceback.format_list(traceback.extract_tb(tb)[start:stop])
+    string = (''.join(string).split('\n') +
+              traceback.format_exception_only(etype, value))
+    string = ':\n' + prefix + ('\n' + prefix).join(string)
+    return string
 
 
 def _check_copy_dep(inst, copy, kind='inst'):
@@ -182,6 +195,9 @@ def object_size(x):
             size += object_size(value)
     elif isinstance(x, (list, tuple)):
         size = sys.getsizeof(x) + sum(object_size(xx) for xx in x)
+    elif sparse.isspmatrix_csc(x) or sparse.isspmatrix_csr(x):
+        size = sum(sys.getsizeof(xx)
+                   for xx in [x, x.data, x.indices, x.indptr])
     else:
         raise RuntimeError('unsupported type: %s (%s)' % (type(x), x))
     return size
@@ -328,13 +344,11 @@ def warn(message, category=RuntimeWarning):
     """
     import mne
     root_dir = op.dirname(mne.__file__)
-    stacklevel = 1
     frame = None
     stack = inspect.stack()
     last_fname = ''
     for fi, frame in enumerate(stack):
-        fname = frame[1]
-        del frame
+        fname, lineno = frame[1:3]
         if fname == '<string>' and last_fname == 'utils.py':  # in verbose dec
             last_fname = fname
             continue
@@ -343,12 +357,14 @@ def warn(message, category=RuntimeWarning):
         if not (fname.startswith(root_dir) or
                 ('unittest' in fname and 'case' in fname)) or \
                 op.basename(op.dirname(fname)) == 'tests':
-            stacklevel = fi + 1
             break
         last_fname = op.basename(fname)
-    del stack
     if logger.level <= logging.WARN:
-        warnings.warn(message, category, stacklevel=stacklevel)
+        # We need to use this instead of warn(message, category, stacklevel)
+        # because we move out of the MNE stack, so warnings won't properly
+        # recognize the module name (and our warnings.simplefilter will fail)
+        warnings.warn_explicit(message, category, fname, lineno,
+                               'mne', globals().get('__warningregistry__', {}))
     logger.warning(message)
 
 
@@ -1140,7 +1156,7 @@ def run_subprocess(command, verbose=None, *args, **kwargs):
 
     Parameters
     ----------
-    command : list of str
+    command : list of str | str
         Command to run as subprocess (see subprocess.Popen documentation).
     verbose : bool, str, int, or None
         If not None, override default verbose level (see mne.verbose).
@@ -1174,12 +1190,19 @@ def run_subprocess(command, verbose=None, *args, **kwargs):
              'starting with a tilde ("~") character. Such paths are not '
              'interpreted correctly from within Python. It is recommended '
              'that you use "$HOME" instead of "~".')
-
-    logger.info("Running subprocess: %s" % ' '.join(command))
+    if isinstance(command, string_types):
+        command_str = command
+    else:
+        command_str = ' '.join(command)
+    logger.info("Running subprocess: %s" % command_str)
     try:
         p = subprocess.Popen(command, *args, **kwargs)
     except Exception:
-        logger.error('Command not found: %s' % (command[0],))
+        if isinstance(command, string_types):
+            command_name = command.split()[0]
+        else:
+            command_name = command[0]
+        logger.error('Command not found: %s' % command_name)
         raise
     stdout_, stderr = p.communicate()
     stdout_ = '' if stdout_ is None else stdout_.decode('utf-8')
@@ -1973,8 +1996,9 @@ def _get_stim_channel(stim_channel, info, raise_error=True):
     """Helper to determine the appropriate stim_channel
 
     First, 'MNE_STIM_CHANNEL', 'MNE_STIM_CHANNEL_1', 'MNE_STIM_CHANNEL_2', etc.
-    are read. If these are not found, it will fall back to 'STI 014' if
-    present, then fall back to the first channel of type 'stim', if present.
+    are read. If these are not found, it will fall back to 'STI101' or
+    'STI 014' if present, then fall back to the first channel of type
+    'stim', if present.
 
     Parameters
     ----------
@@ -2007,7 +2031,10 @@ def _get_stim_channel(stim_channel, info, raise_error=True):
     if ch_count > 0:
         return stim_channel
 
-    if 'STI 014' in info['ch_names']:
+    if 'STI101' in info['ch_names']:  # newer Elekta systems
+        return ['STI101']
+
+    if 'STI 014' in info['ch_names']:  # older Elekta systems
         return ['STI 014']
 
     from .io.pick import pick_types
@@ -2103,24 +2130,6 @@ def _clean_names(names, remove_whitespace=False, before_dash=True):
         cleaned.append(name)
 
     return cleaned
-
-
-def clean_warning_registry():
-    """Safe way to reset warnings """
-    warnings.resetwarnings()
-    reg = "__warningregistry__"
-    bad_names = ['MovedModule']  # this is in six.py, and causes bad things
-    for mod in list(sys.modules.values()):
-        if mod.__class__.__name__ not in bad_names and hasattr(mod, reg):
-            getattr(mod, reg).clear()
-    # hack to deal with old scipy/numpy in tests
-    if os.getenv('TRAVIS') == 'true' and sys.version.startswith('2.6'):
-        warnings.simplefilter('default')
-        try:
-            np.rank([])
-        except Exception:
-            pass
-        warnings.simplefilter('always')
 
 
 def _check_type_picks(picks):

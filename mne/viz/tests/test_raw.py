@@ -2,12 +2,14 @@
 #
 # License: Simplified BSD
 
+import numpy as np
 import os.path as op
 import warnings
 
 from numpy.testing import assert_raises, assert_equal
 
-from mne import io, read_events, pick_types, Annotations
+from mne import read_events, pick_types, Annotations
+from mne.io import read_raw_fif
 from mne.utils import requires_version, run_tests_if_main
 from mne.viz.utils import _fake_click
 from mne.viz import plot_raw, plot_sensors
@@ -24,7 +26,8 @@ event_name = op.join(base_dir, 'test-eve.fif')
 
 
 def _get_raw():
-    raw = io.read_raw_fif(raw_fname, preload=True)
+    """Get raw data."""
+    raw = read_raw_fif(raw_fname, preload=True, add_eeg_ref=False)
     # Throws a warning about a changed unit.
     with warnings.catch_warnings(record=True):
         raw.set_channel_types({raw.ch_names[0]: 'ias'})
@@ -34,6 +37,7 @@ def _get_raw():
 
 
 def _get_events():
+    """Get events."""
     return read_events(event_name)
 
 
@@ -121,6 +125,13 @@ def test_plot_raw():
                             kind='release')
 
             plt.close('all')
+        # test if meas_date has only one element
+        raw.info['meas_date'] = np.array([raw.info['meas_date'][0]],
+                                         dtype=np.int32)
+        raw.annotations = Annotations([1 + raw.first_samp / raw.info['sfreq']],
+                                      [5], ['bad'])
+        raw.plot()
+        plt.close('all')
 
 
 @requires_version('scipy', '0.10')

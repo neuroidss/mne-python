@@ -14,8 +14,8 @@ from numpy.testing import (assert_array_equal, assert_equal,
 from mne import io, read_events, Epochs, pick_types
 from mne.decoding import Scaler, FilterEstimator
 from mne.decoding import (PSDEstimator, EpochsVectorizer, Vectorizer,
-                          UnsupervisedSpatialFilter)
-from mne.utils import requires_sklearn
+                          UnsupervisedSpatialFilter, TemporalFilter)
+from mne.utils import requires_sklearn_0_15
 
 warnings.simplefilter('always')  # enable b/c these tests throw warnings
 
@@ -29,16 +29,15 @@ event_name = op.join(data_dir, 'test-eve.fif')
 
 
 def test_scaler():
-    """Test methods of Scaler
-    """
-    raw = io.read_raw_fif(raw_fname, preload=False)
+    """Test methods of Scaler."""
+    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
 
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True)
+                    baseline=(None, 0), preload=True, add_eeg_ref=False)
     epochs_data = epochs.get_data()
     scaler = Scaler(epochs.info)
     y = epochs.events[:, -1]
@@ -62,15 +61,14 @@ def test_scaler():
 
 
 def test_filterestimator():
-    """Test methods of FilterEstimator
-    """
-    raw = io.read_raw_fif(raw_fname, preload=False)
+    """Test methods of FilterEstimator."""
+    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True)
+                    baseline=(None, 0), preload=True, add_eeg_ref=False)
     epochs_data = epochs.get_data()
 
     # Add tests for different combinations of l_freq and h_freq
@@ -107,15 +105,14 @@ def test_filterestimator():
 
 
 def test_psdestimator():
-    """Test methods of PSDEstimator
-    """
-    raw = io.read_raw_fif(raw_fname, preload=False)
+    """Test methods of PSDEstimator."""
+    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True)
+                    baseline=(None, 0), preload=True, add_eeg_ref=False)
     epochs_data = epochs.get_data()
     psd = PSDEstimator(2 * np.pi, 0, np.inf)
     y = epochs.events[:, -1]
@@ -130,18 +127,18 @@ def test_psdestimator():
 
 
 def test_epochs_vectorizer():
-    """Test methods of EpochsVectorizer
-    """
-    raw = io.read_raw_fif(raw_fname, preload=False)
+    """Test methods of EpochsVectorizer."""
+    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
     with warnings.catch_warnings(record=True):
         epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                        baseline=(None, 0), preload=True)
+                        baseline=(None, 0), preload=True, add_eeg_ref=False)
     epochs_data = epochs.get_data()
-    vector = EpochsVectorizer(epochs.info)
+    with warnings.catch_warnings(record=True):  # deprecation
+        vector = EpochsVectorizer(epochs.info)
     y = epochs.events[:, -1]
     X = vector.fit_transform(epochs_data, y)
 
@@ -196,17 +193,19 @@ def test_vectorizer():
                   np.random.rand(102, 12, 12))
 
 
-@requires_sklearn
+@requires_sklearn_0_15
 def test_unsupervised_spatial_filter():
+    """Test unsupervised spatial filter."""
     from sklearn.decomposition import PCA
     from sklearn.kernel_ridge import KernelRidge
-    raw = io.read_raw_fif(raw_fname, preload=False)
+    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    preload=True, baseline=None, verbose=False)
+                    preload=True, baseline=None, verbose=False,
+                    add_eeg_ref=False)
 
     # Test estimator
     assert_raises(ValueError, UnsupervisedSpatialFilter, KernelRidge(2))
@@ -229,3 +228,32 @@ def test_unsupervised_spatial_filter():
     usf = UnsupervisedSpatialFilter(PCA(4), average=True)
     usf.fit_transform(X)
     assert_raises(ValueError, UnsupervisedSpatialFilter, PCA(4), 2)
+
+
+def test_temporal_filter():
+    """Test methods of TemporalFilter."""
+    X = np.random.rand(5, 5, 1200)
+
+    # Test init test
+    values = (('10hz', None, 100., 'auto'), (5., '10hz', 100., 'auto'),
+              (10., 20., 5., 'auto'), (None, None, 100., '5hz'))
+    for low, high, sf, ltrans in values:
+        filt = TemporalFilter(low, high, sf, ltrans)
+        assert_raises(ValueError, filt.fit_transform, X)
+
+    # Add tests for different combinations of l_freq and h_freq
+    for low, high in ((5., 15.), (None, 15.), (5., None)):
+        filt = TemporalFilter(low, high, sfreq=100.)
+        Xt = filt.fit_transform(X)
+        assert_array_equal(filt.fit_transform(X), Xt)
+        assert_true(X.shape == Xt.shape)
+
+    # Test fit and transform numpy type check
+    with warnings.catch_warnings(record=True):
+        assert_raises(TypeError, filt.transform, [1, 2])
+
+    # Test with 2 dimensional data array
+    X = np.random.rand(101, 500)
+    filt = TemporalFilter(l_freq=25., h_freq=50., sfreq=1000.,
+                          filter_length=150)
+    assert_equal(filt.fit_transform(X).shape, X.shape)

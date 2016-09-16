@@ -12,7 +12,7 @@ from mne.datasets import testing
 from mne.beamformer import dics, dics_epochs, dics_source_power, tf_dics
 from mne.time_frequency import csd_epochs
 from mne.externals.six import advance_iterator
-from mne.utils import run_tests_if_main, clean_warning_registry
+from mne.utils import run_tests_if_main
 
 # Note that this is the first test file, this will apply to all subsequent
 # tests in a full nosetest:
@@ -29,9 +29,6 @@ fname_event = op.join(data_path, 'MEG', 'sample',
 label = 'Aud-lh'
 fname_label = op.join(data_path, 'MEG', 'sample', 'labels', '%s.label' % label)
 
-# bit of a hack to deal with old scipy/numpy throwing warnings in tests
-clean_warning_registry()
-
 
 def read_forward_solution_meg(*args, **kwargs):
     fwd = mne.read_forward_solution(*args, **kwargs)
@@ -43,7 +40,7 @@ def _get_data(tmin=-0.11, tmax=0.15, read_all_forward=True, compute_csds=True):
     """
     label = mne.read_label(fname_label)
     events = mne.read_events(fname_event)[:10]
-    raw = mne.io.read_raw_fif(fname_raw, preload=False)
+    raw = mne.io.read_raw_fif(fname_raw, preload=False, add_eeg_ref=False)
     raw.add_proj([], remove_existing=True)  # we'll subselect so remove proj
     forward = mne.read_forward_solution(fname_fwd)
     if read_all_forward:
@@ -70,7 +67,8 @@ def _get_data(tmin=-0.11, tmax=0.15, read_all_forward=True, compute_csds=True):
     # Read epochs
     epochs = mne.Epochs(raw, events, event_id, tmin, tmax, proj=True,
                         picks=picks, baseline=(None, 0), preload=True,
-                        reject=dict(grad=4000e-13, mag=4e-12, eog=150e-6))
+                        reject=dict(grad=4000e-13, mag=4e-12, eog=150e-6),
+                        add_eeg_ref=False)
     epochs.resample(200, npad=0, n_jobs=2)
     evoked = epochs.average()
 

@@ -16,10 +16,10 @@ from ..externals.six import string_types
 
 from ..utils import verbose, logger, warn, copy_function_doc_to_method_doc
 from ..io.compensator import get_current_comp
+from ..io.constants import FIFF
 from ..io.meas_info import anonymize_info
 from ..io.pick import (channel_type, pick_info, pick_types,
                        _check_excludes_includes, _PICK_TYPES_KEYS)
-from ..io.constants import FIFF
 
 
 def _get_meg_system(info):
@@ -228,8 +228,52 @@ def _check_set(ch, projs, ch_type):
 
 
 class SetChannelsMixin(object):
-    """Mixin class for Raw, Evoked, Epochs
-    """
+    """Mixin class for Raw, Evoked, Epochs."""
+
+    def set_eeg_reference(self, ref_channels=None):
+        """Rereference EEG channels to new reference channel(s).
+
+        If multiple reference channels are specified, they will be averaged. If
+        no reference channels are specified, an average reference will be
+        applied.
+
+        Parameters
+        ----------
+        ref_channels : list of str | None
+            The names of the channels to use to construct the reference. If
+            None (default), an average reference will be added as an SSP
+            projector but not immediately applied to the data. If an empty list
+            is specified, the data is assumed to already have a proper
+            reference and MNE will not attempt any re-referencing of the data.
+            Defaults to an average reference (None).
+
+        Returns
+        -------
+        inst : instance of Raw | Epochs | Evoked
+            Data with EEG channels re-referenced. For ``ref_channels=None``,
+            an average projector will be added instead of directly subtarcting
+            data.
+
+        Notes
+        -----
+        1. If a reference is requested that is not the average reference, this
+           function removes any pre-existing average reference projections.
+
+        2. During source localization, the EEG signal should have an average
+           reference.
+
+        3. In order to apply a reference other than an average reference, the
+           data must be preloaded.
+
+        .. versionadded:: 0.13.0
+
+        See Also
+        --------
+        mne.set_bipolar_reference
+        """
+        from ..io.reference import set_eeg_reference
+        return set_eeg_reference(self, ref_channels, copy=False)[0]
+
     def _get_channel_positions(self, picks=None):
         """Gets channel locations from info
 
@@ -560,7 +604,7 @@ class UpdateChannelsMixin(object):
         Parameters
         ----------
         ch_names : list
-            The list of channels to remove.
+            List of the names of the channels to remove.
 
         Returns
         -------
@@ -575,10 +619,26 @@ class UpdateChannelsMixin(object):
         -----
         .. versionadded:: 0.9.0
         """
-        bad_idx = [self.ch_names.index(c) for c in ch_names
-                   if c in self.ch_names]
+        msg = ("'ch_names' should be a list of strings (the name[s] of the "
+               "channel to be dropped), not a {0}.")
+        if isinstance(ch_names, string_types):
+            raise ValueError(msg.format("string"))
+        else:
+            if not all([isinstance(ch_name, string_types)
+                        for ch_name in ch_names]):
+                raise ValueError(msg.format(type(ch_names[0])))
+
+        missing = [ch_name for ch_name in ch_names
+                   if ch_name not in self.ch_names]
+        if len(missing) > 0:
+            msg = "Channel(s) {0} not found, nothing dropped."
+            raise ValueError(msg.format(", ".join(missing)))
+
+        bad_idx = [self.ch_names.index(ch_name) for ch_name in ch_names
+                   if ch_name in self.ch_names]
         idx = np.setdiff1d(np.arange(len(self.ch_names)), bad_idx)
         self._pick_drop_channels(idx)
+
         return self
 
     def _pick_drop_channels(self, idx):

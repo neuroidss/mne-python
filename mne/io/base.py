@@ -30,7 +30,6 @@ from .write import (start_file, end_file, start_block, end_block,
 
 from ..filter import (filter_data, notch_filter, resample, next_fast_len,
                       _resample_stim_channels)
-from ..fixes import in1d
 from ..parallel import parallel_func
 from ..utils import (_check_fname, _check_pandas_installed, sizeof_fmt,
                      _check_pandas_index_arguments, _check_copy_dep,
@@ -41,7 +40,7 @@ from ..viz import plot_raw, plot_raw_psd, plot_raw_psd_topo
 from ..defaults import _handle_default
 from ..externals.six import string_types
 from ..event import find_events, concatenate_events
-from ..annotations import _combine_annotations, _onset_to_seconds
+from ..annotations import Annotations, _combine_annotations, _onset_to_seconds
 
 
 class ToDataFrameMixin(object):
@@ -50,7 +49,7 @@ class ToDataFrameMixin(object):
         if picks is None:
             picks = list(range(self.info['nchan']))
         else:
-            if not in1d(picks, np.arange(len(picks_check))).all():
+            if not np.in1d(picks, np.arange(len(picks_check))).all():
                 raise ValueError('At least one picked channel is not present '
                                  'in this object instance.')
         return picks
@@ -586,6 +585,62 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     def _raw_lengths(self):
         return [l - f + 1 for f, l in zip(self._first_samps, self._last_samps)]
 
+    @property
+    def annotations(self):
+        """Annotations for marking segments of data."""
+        return self._annotations
+
+    @annotations.setter
+    def annotations(self, annotations):
+        """Setter for annotations. Checks if they are inside the data range.
+
+        Parameters
+        ----------
+        annotations : Instance of mne.Annotations
+            Annotations to set.
+        """
+        if annotations is not None:
+            if not isinstance(annotations, Annotations):
+                raise ValueError('Annotations must be an instance of '
+                                 'mne.Annotations. Got %s.' % annotations)
+            meas_date = self.info['meas_date']
+            if meas_date is None:
+                meas_date = 0
+            elif not np.isscalar(meas_date):
+                if len(meas_date) > 1:
+                    meas_date = meas_date[0] + meas_date[1] / 1000000.
+            if annotations.orig_time is not None:
+                offset = (annotations.orig_time - meas_date -
+                          self.first_samp / self.info['sfreq'])
+            else:
+                offset = 0
+            omit_ind = list()
+            for ind, onset in enumerate(annotations.onset):
+                onset += offset
+                if onset > self.times[-1]:
+                    warn('Omitting annotation outside data range.')
+                    omit_ind.append(ind)
+                elif onset < self.times[0]:
+                    if onset + annotations.duration[ind] < self.times[0]:
+                        warn('Omitting annotation outside data range.')
+                        omit_ind.append(ind)
+                    else:
+                        warn('Annotation starting outside the data range. '
+                             'Limiting to the start of data.')
+                        duration = annotations.duration[ind] + onset
+                        annotations.duration[ind] = duration
+                        annotations.onset[ind] = self.times[0] - offset
+                elif onset + annotations.duration[ind] > self.times[-1]:
+                    warn('Annotation expanding outside the data range. '
+                         'Limiting to the end of data.')
+                    annotations.duration[ind] = self.times[-1] - onset
+            annotations.onset = np.delete(annotations.onset, omit_ind)
+            annotations.duration = np.delete(annotations.duration, omit_ind)
+            annotations.description = np.delete(annotations.description,
+                                                omit_ind)
+
+        self._annotations = annotations
+
     def __del__(self):
         # remove file for memmap
         if hasattr(self, '_data') and hasattr(self._data, 'filename'):
@@ -971,6 +1026,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         mne.io.Raw.notch_filter
         mne.io.Raw.resample
         mne.filter.filter_data
+        mne.filter.construct_iir_filter
 
         Notes
         -----
@@ -989,7 +1045,7 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                                    'your Raw object. Please contact the '
                                    'MNE-Python developers.')
         elif h_freq is not None or l_freq is not None:
-            if in1d(data_picks, picks).all():
+            if np.in1d(data_picks, picks).all():
                 update_info = True
             else:
                 logger.info('Filtering a subset of channels. The highpass and '
@@ -1332,6 +1388,10 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             # slice and copy to avoid the reference to large array
             raw._data = raw._data[:, smin:smax + 1].copy()
         raw._update_times()
+        if raw.annotations is not None:
+            annotations = raw.annotations
+            annotations.onset -= tmin
+            raw.annotations = annotations
         return raw
 
     @verbose
@@ -1719,18 +1779,19 @@ class _BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             self.preload = True
 
         # now combine information from each raw file to construct new self
+        annotations = self.annotations
         for r in raws:
             self._first_samps = np.r_[self._first_samps, r._first_samps]
             self._last_samps = np.r_[self._last_samps, r._last_samps]
             self._raw_extras += r._raw_extras
             self._filenames += r._filenames
-            self.annotations = _combine_annotations((self.annotations,
-                                                     r.annotations),
-                                                    self._last_samps,
-                                                    self._first_samps,
-                                                    self.info['sfreq'])
+            annotations = _combine_annotations((annotations, r.annotations),
+                                               self._last_samps,
+                                               self._first_samps,
+                                               self.info['sfreq'])
 
         self._update_times()
+        self.annotations = annotations
 
         if not (len(self._first_samps) == len(self._last_samps) ==
                 len(self._raw_extras) == len(self._filenames)):
@@ -2213,3 +2274,21 @@ def _check_update_montage(info, montage, path=None, update_ch_names=False):
                     "definitions: %s. If those channels lack positions "
                     "because they are EOG channels use the eog parameter."
                     % str(missing_positions))
+
+
+def _check_maxshield(allow_maxshield):
+    """Warn or error about MaxShield."""
+    msg = ('This file contains raw Internal Active '
+           'Shielding data. It may be distorted. Elekta '
+           'recommends it be run through MaxFilter to '
+           'produce reliable results. Consider closing '
+           'the file and running MaxFilter on the data.')
+    if allow_maxshield:
+        if not (isinstance(allow_maxshield, string_types) and
+                allow_maxshield == 'yes'):
+            warn(msg)
+        allow_maxshield = 'yes'
+    else:
+        msg += (' Use allow_maxshield=True if you are sure you'
+                ' want to load the data despite this warning.')
+        raise ValueError(msg)

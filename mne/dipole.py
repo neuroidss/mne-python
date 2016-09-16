@@ -4,6 +4,7 @@
 # License: Simplified BSD
 
 from copy import deepcopy
+from functools import partial
 import re
 
 import numpy as np
@@ -31,7 +32,6 @@ from .bem import _bem_find_surface, _bem_explain_surface
 from .source_space import (_make_volume_source_space, SourceSpaces,
                            _points_outside_surface)
 from .parallel import parallel_func
-from .fixes import partial
 from .utils import logger, verbose, _time_mask, warn, _check_fname, check_fname
 
 
@@ -386,29 +386,80 @@ def read_dipole(fname, verbose=None):
     _check_fname(fname, overwrite=True, must_exist=True)
     if fname.endswith('.fif') or fname.endswith('.fif.gz'):
         return _read_dipole_fixed(fname)
-    try:
-        data = np.loadtxt(fname, comments='%')
-    except:
-        data = np.loadtxt(fname, comments='#')  # handle 2 types of comments...
-    name = None
+    else:
+        return _read_dipole_text(fname)
+
+
+def _read_dipole_text(fname):
+    """Read a dipole text file."""
+    # Figure out the special fields
+    need_header = True
+    def_line = name = None
+    # There is a bug in older np.loadtxt regarding skipping fields,
+    # so just read the data ourselves (need to get name and header anyway)
+    data = list()
     with open(fname, 'r') as fid:
-        for line in fid.readlines():
-            if line.startswith('##') or line.startswith('%%'):
-                m = re.search('Name "(.*) dipoles"', line)
-                if m:
-                    name = m.group(1)
-                    break
-    if data.ndim == 1:
-        data = data[None, :]
+        for line in fid:
+            if not (line.startswith('%') or line.startswith('#')):
+                need_header = False
+                data.append(line.strip().split())
+            else:
+                if need_header:
+                    def_line = line
+                if line.startswith('##') or line.startswith('%%'):
+                    m = re.search('Name "(.*) dipoles"', line)
+                    if m:
+                        name = m.group(1)
+        del line
+    data = np.atleast_2d(np.array(data, float))
+    if def_line is None:
+        raise IOError('Dipole text file is missing field definition '
+                      'comment, cannot parse %s' % (fname,))
+    # actually parse the fields
+    def_line = def_line.lstrip('%').lstrip('#').strip()
+    # MNE writes it out differently than Elekta, let's standardize them...
+    fields = re.sub('([X|Y|Z] )\(mm\)',  # "X (mm)", etc.
+                    lambda match: match.group(1).strip() + '/mm', def_line)
+    fields = re.sub('\((.*?)\)',  # "Q(nAm)", etc.
+                    lambda match: '/' + match.group(1), fields)
+    fields = re.sub('(begin|end) ',  # "begin" and "end" with no units
+                    lambda match: match.group(1) + '/ms', fields)
+    fields = fields.lower().split()
+    used_fields = ('begin/ms',
+                   'x/mm', 'y/mm', 'z/mm',
+                   'q/nam',
+                   'qx/nam', 'qy/nam', 'qz/nam',
+                   'g/%')
+    missing_fields = sorted(set(used_fields) - set(fields))
+    if len(missing_fields) > 0:
+        raise RuntimeError('Could not find necessary fields in header: %s'
+                           % (missing_fields,))
+    ignored_fields = sorted(set(fields) - set(used_fields) - set(['end/ms']))
+    if len(ignored_fields) > 0:
+        warn('Ignoring extra fields in dipole file: %s' % (ignored_fields,))
+    if len(fields) != data.shape[1]:
+        raise IOError('More data fields (%s) found than data columns (%s): %s'
+                      % (len(fields), data.shape[1], fields))
+
     logger.info("%d dipole(s) found" % len(data))
-    times = data[:, 0] / 1000.
-    pos = 1e-3 * data[:, 2:5]  # put data in meters
-    amplitude = data[:, 5]
+
+    if 'end/ms' in fields:
+        if np.diff(data[:, [fields.index('begin/ms'),
+                            fields.index('end/ms')]], 1, -1).any():
+            warn('begin and end fields differed, but only begin will be used '
+                 'to store time values')
+
+    # Find the correct column in our data array, then scale to proper units
+    idx = [fields.index(field) for field in used_fields]
+    assert len(idx) == 9
+    times = data[:, idx[0]] / 1000.
+    pos = 1e-3 * data[:, idx[1:4]]  # put data in meters
+    amplitude = data[:, idx[4]]
     norm = amplitude.copy()
     amplitude /= 1e9
     norm[norm == 0] = 1
-    ori = data[:, 6:9] / norm[:, np.newaxis]
-    gof = data[:, 9]
+    ori = data[:, idx[5:8]] / norm[:, np.newaxis]
+    gof = data[:, idx[8]]
     return Dipole(times, pos, amplitude, ori, gof, name)
 
 
@@ -1038,7 +1089,7 @@ def fit_dipole(evoked, cov, bem, trans=None, min_dist=5., n_jobs=1,
     return dipoles, residual
 
 
-def get_phantom_dipoles(kind='elekta'):
+def get_phantom_dipoles(kind='vectorview'):
     """Get standard phantom dipole locations and orientations
 
     Parameters

@@ -10,13 +10,13 @@ Morlet code inspired by Matlab code from Sheraz Khan & Brainstorm & SPM
 # License : BSD (3-clause)
 
 from copy import deepcopy
+from functools import partial
 from math import sqrt
 
 import numpy as np
 from scipy import linalg
 from scipy.fftpack import fft, ifft
 
-from ..fixes import partial
 from ..baseline import rescale
 from ..parallel import parallel_func
 from ..utils import (logger, verbose, _time_mask, check_fname, deprecated,
@@ -971,9 +971,16 @@ class _BaseTFR(ContainsMixin, UpdateChannelsMixin, SizeMixin):
             If None no baseline correction is applied.
         verbose : bool, str, int, or None
             If not None, override default verbose level (see mne.verbose).
+
+        Returns
+        -------
+        inst : instance of AverageTFR
+            The modified instance.        
+
         """  # noqa
         self.data = rescale(self.data, self.times, baseline, mode,
                             copy=False)
+        return self
 
 
 class AverageTFR(_BaseTFR):
@@ -1030,7 +1037,7 @@ class AverageTFR(_BaseTFR):
         self.method = method
 
     @verbose
-    def plot(self, picks=None, baseline=None, mode='mean', tmin=None,
+    def plot(self, picks, baseline=None, mode='mean', tmin=None,
              tmax=None, fmin=None, fmax=None, vmin=None, vmax=None,
              cmap='RdBu_r', dB=False, colorbar=True, show=True,
              title=None, axes=None, layout=None, verbose=None):
@@ -1038,8 +1045,8 @@ class AverageTFR(_BaseTFR):
 
         Parameters
         ----------
-        picks : array-like of int | None
-            The indices of the channels to plot.
+        picks : array-like of int
+            The indices of the channels to plot, one figure per channel.
         baseline : None (default) or tuple of length 2
             The time interval to apply baseline correction.
             If None do not apply it. If baseline is (a, b)

@@ -41,6 +41,8 @@ Changelog
 
     - Add support for \*.elp and \*.hsp files to the KIT2FIFF converter and :func:`mne.channels.read_dig_montage` by `Teon Brooks`_ and `Christian Brodbeck`_
 
+    - Add option to preview events in the KIT2FIFF GUI by `Christian Brodbeck`_
+
     - Add approximation of size of :class:`io.Raw`, :class:`Epochs`, and :class:`Evoked` in :func:`repr` by `Eric Larson`_
 
     - Add possibility to select a subset of sensors by lasso selector to :func:`mne.viz.plot_sensors` and :func:`mne.viz.plot_raw` when using order='selection' or order='position' by `Jaakko Leppakangas`_
@@ -64,6 +66,14 @@ Changelog
     - Components obtained from :class:`mne.preprocessing.ICA` are now sorted by explained variance, by `Mikołaj Magnuski`_
 
     - Adding an EEG reference channel using :func:`mne.io.add_reference_channels` will now use its digitized location from the FIFF file, if present, by `Chris Bailey`_
+
+    - Added interactivity to :func:`mne.preprocessing.ICA.plot_components` - passing an instance of :class:`io.Raw` or :class:`Epochs` in ``inst`` argument allows to open component properties by clicking on component topomaps, by `Mikołaj Magnuski`_
+
+    - Adds new function :func:`mne.viz.plot_compare_evokeds` to show multiple evoked time courses at a single location, or the mean over a ROI, or the GFP, automatically averaging and calculating a CI if multiple subjects are given, by `Jona Sassenhagen`_
+
+    - Added `transform_into` parameter into :class:`mne.decoding.CSP` to retrieve the average power of each source or the time course of each source, by `Jean-Remi King`_
+
+    - Added support for reading MaxShield (IAS) evoked data (e.g., from the acquisition machine) in :func:`mne.read_evokeds` by `Eric Larson`_
 
 BUG
 ~~~
@@ -98,8 +108,28 @@ BUG
 
     - Fixed bug with :func:`mne.realtime.FieldTripClient.get_data_as_epoch` when ``picks=None`` which crashed the function by `Mainak Jas`_
 
+    - Fixed reading of units in ``.elc`` montage files (from ``UnitsPosition`` field) so that :class:`mne.channels.Montage` objects are now returned with the ``pos`` attribute correctly in meters, by `Chris Mullins`_
+
+    - Fixed reading of BrainVision files by `Phillip Alday`_:
+
+        - Greater support for BVA files, especially older ones: alternate text coding schemes with fallback to Latin-1 as well as units in column headers
+
+        - Use online software filter information when present
+
+        - Fix comparisons of filter settings for determining "strictest"/"weakest" filter
+
+        - Weakest filter is now used for heterogeneous channel filter settings, leading to more consistent behavior with filtering methods applied to a subset of channels (e.g. ``Raw.filter`` with ``picks != None``).  
+
+    - Fixed plotting and timing of :class:`Annotations` and restricted addition of annotations outside data range to prevent problems with cropping and concatenating data by `Jaakko Leppakangas`_
+
+    - Fixed ICA plotting functions to refer to IC index instead of component number by `Andreas Hojlund`_ and `Jaakko Leppakangas`_
+
+    - Fixed bug with ``picks`` when interpolating MEG channels by `Mainak Jas`_.
+
 API
 ~~~
+
+    - The ``add_eeg_ref`` argument in core functions like :func:`mne.io.read_raw_fif` and :class:`mne.Epochs` has been deprecated in favor of using :func:`mne.set_eeg_reference` and equivalent instance methods like :meth:`raw.set_eeg_reference() <mne.io.Raw.set_eeg_reference>`. In functions like :func:`mne.io.read_raw_fif` where the default in 0.13 and older versions is ``add_eeg_ref=True``, the default will change to ``add_eeg_ref=False`` in 0.14, and the argument will be removed in 0.15.
 
     - Multiple aspects of FIR filtering in MNE-Python has been refactored:
 
@@ -112,6 +142,8 @@ API
           4. A warning is provided when the filter is longer than the signal of interest, as this is unlikely to produce desired results.
 
           5. Previously, if the filter was as long or longer than the signal of interest, direct FFT-based computations were used. Now a single code path (overlap-add filtering) is used for all FIR filters. This could cause minor changes in how short signals are filtered.
+
+    - Support for Python 2.6 has been dropped, and the minimum supported dependencies are NumPy_ 1.8, SciPy_ 0.12, and Matplotlib_ 1.3 by `Eric Larson`_
 
     - When CTF gradient compensation is applied to raw data, it is no longer reverted on save of :meth:`mne.io.Raw.save` by `Eric Larson`_
 
@@ -164,6 +196,12 @@ API
     - Add argument ``mask_type`` to func:`mne.read_events` and func:`mne.find_events` to support MNE-C style of trigger masking by `Teon Brooks`_ and `Eric Larson`_
 
     - Extended Infomax is now the new default in :func:`mne.preprocessing.infomax` (``extended=True``), by `Clemens Brunner`_
+
+    - :func:`mne.io.read_raw_eeglab` and :func:`mne.io.read_epochs_eeglab` now take additional argument ``uint16_codec`` that allows to define the encoding of character arrays in set file. This helps in rare cases when reading a set file fails with ``TypeError: buffer is too small for requested array``. By `Mikołaj Magnuski`_
+
+    - Added :class:`mne.decoding.TemporalFilter` to filter data in scikit-learn pipelines, by `Asish Panda`_
+
+    - :func:`mne.preprocessing.create_ecg_epochs` now includes all the channels when ``picks=None`` by `Jaakko Leppakangas`_
 
 .. _changes_0_12:
 
@@ -1719,3 +1757,9 @@ of commits):
 .. _Nick Foti: http://nfoti.github.io
 
 .. _Guillaume Dumas: http://www.extrospection.eu
+
+.. _Chris Mullins: http://crmullins.com
+
+.. _Phillip Alday: http://palday.bitbucket.org
+
+.. _Andreas Hojlund: https://github.com/ahoejlund

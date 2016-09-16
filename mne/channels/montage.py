@@ -132,9 +132,10 @@ def read_montage(kind, ch_names=None, path=None, unit='m', transform=False):
     Parameters
     ----------
     kind : str
-        The name of the montage file (e.g. kind='easycap-M10' for
-        'easycap-M10.txt'). Files with extensions '.elc', '.txt', '.csd',
-        '.elp', '.hpts', '.sfp' or '.loc' ('.locs' and '.eloc') are supported.
+        The name of the montage file without the file extension (e.g.
+        kind='easycap-M10' for 'easycap-M10.txt'). Files with extensions
+        '.elc', '.txt', '.csd', '.elp', '.hpts', '.sfp' or '.loc' ('.locs' and
+        '.eloc') are supported.
     ch_names : list of str | None
         If not all electrodes defined in the montage are present in the EEG
         data, use this parameter to select subset of electrode positions to
@@ -189,7 +190,7 @@ def read_montage(kind, ch_names=None, path=None, unit='m', transform=False):
     if ext == '.sfp':
         # EGI geodesic
         with open(fname, 'r') as f:
-            lines = f.read().replace('\t', ' ').split("\n")
+            lines = f.read().replace('\t', ' ').splitlines()
 
         ch_names_, pos = [], []
         for ii, line in enumerate(lines):
@@ -206,6 +207,14 @@ def read_montage(kind, ch_names=None, path=None, unit='m', transform=False):
         ch_names_ = []
         pos = []
         with open(fname) as fid:
+            # Default units are meters
+            for line in fid:
+                if 'UnitPosition' in line:
+                    units = line.split()[1]
+                    scale_factor = dict(m=1., mm=1e-3)[units]
+                    break
+            else:
+                raise RuntimeError('Could not detect units in file %s' % fname)
             for line in fid:
                 if 'Positions\n' in line:
                     break
@@ -218,7 +227,7 @@ def read_montage(kind, ch_names=None, path=None, unit='m', transform=False):
                 if not line or not set(line) - set([' ']):
                     break
                 ch_names_.append(line.strip(' ').strip('\n'))
-        pos = np.array(pos)
+        pos = np.array(pos) * scale_factor
     elif ext == '.txt':
         # easycap
         try:  # newer version

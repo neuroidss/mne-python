@@ -1,7 +1,7 @@
 """IIR and FIR filtering functions"""
 
 from copy import deepcopy
-import math
+from functools import partial
 
 import numpy as np
 from scipy.fftpack import fft, ifftshift, fftfreq, ifft
@@ -9,7 +9,7 @@ from scipy.fftpack import fft, ifftshift, fftfreq, ifft
 from .cuda import (setup_cuda_fft_multiply_repeated, fft_multiply_repeated,
                    setup_cuda_fft_resample, fft_resample, _smart_pad)
 from .externals.six import string_types, integer_types
-from .fixes import get_firwin2, get_filtfilt, get_sosfiltfilt, partial
+from .fixes import get_sosfiltfilt
 from .parallel import parallel_func, check_n_jobs
 from .time_frequency.multitaper import dpss_windows, _mt_spectra
 from .utils import logger, verbose, sum_squared, check_version, warn
@@ -102,9 +102,7 @@ def next_fast_len(target):
             # (quotient = ceil(target / p35))
             quotient = -(-target // p35)
 
-            # Quickly find next power of 2 >= quotient
-            # can't use this b/c of 2.6 (quotient - 1).bit_length()
-            p2 = 2 ** (int(math.log(quotient - 1, 2)) + 1)
+            p2 = 2 ** (quotient - 1).bit_length()
 
             N = p2 * p35
             if N == target:
@@ -337,7 +335,7 @@ def _fir_filter(x, Fs, freq, gain, filter_length, picks=None, n_jobs=1,
     xf : array
         x filtered.
     """
-    firwin2 = get_firwin2()
+    from scipy.signal import firwin2
     # set up array for filtering, reshape to 2D, operate on last axis
     x, orig_shape, picks = _prep_for_filtering(x, copy, picks)
 
@@ -397,6 +395,7 @@ def _check_coefficients(system):
 def _filtfilt(x, iir_params, picks, n_jobs, copy):
     """Helper to more easily call filtfilt"""
     # set up array for filtering, reshape to 2D, operate on last axis
+    from scipy.signal import filtfilt
     padlen = min(iir_params['padlen'], len(x))
     n_jobs = check_n_jobs(n_jobs)
     x, orig_shape, picks = _prep_for_filtering(x, copy, picks)
@@ -405,7 +404,6 @@ def _filtfilt(x, iir_params, picks, n_jobs, copy):
         fun = partial(sosfiltfilt, sos=iir_params['sos'], padlen=padlen)
         _check_coefficients(iir_params['sos'])
     else:
-        filtfilt = get_filtfilt()
         fun = partial(filtfilt, b=iir_params['b'], a=iir_params['a'],
                       padlen=padlen)
         _check_coefficients((iir_params['b'], iir_params['a']))
@@ -2023,10 +2021,11 @@ def _triage_filter_params(x, sfreq, l_freq, h_freq,
                         'change to "auto" in 0.14']
             filter_length = '10s'
         if filter_length == 'auto':
+            h_check = h_trans_bandwidth if h_freq is not None else np.inf
+            l_check = l_trans_bandwidth if l_freq is not None else np.inf
             filter_length = max(int(round(
                 _length_factors[fir_window] * sfreq /
-                float(min(h_trans_bandwidth or np.inf,
-                          l_trans_bandwidth or np.inf)))), 1)
+                float(min(h_check, l_check)))), 1)
             logger.info('Filter length of %s samples (%0.3f sec) selected'
                         % (filter_length, filter_length / sfreq))
         else:
@@ -2068,9 +2067,9 @@ def _triage_filter_params(x, sfreq, l_freq, h_freq,
         raise ValueError('filter_length must be positive, got %s'
                          % (filter_length,))
     if filter_length > len_x:
-        dep += ['filter_length (%s) is longer than the signal (%s), '
-                'distortion is likely. Reduce filter length or filter a '
-                'longer signal.' % (filter_length, len_x)]
+        warn('filter_length (%s) is longer than the signal (%s), '
+             'distortion is likely. Reduce filter length or filter a '
+             'longer signal.' % (filter_length, len_x))
     logger.debug('Using filter length: %s' % filter_length)
     if len(dep) > 0:
         warn(('Multiple deprecated filter parameters were used:\n'

@@ -186,20 +186,29 @@ def add_reference_channels(inst, ref_channels, copy=True):
                         % type(inst))
     nchan = len(inst.info['ch_names'])
 
-    # "zeroth" EEG electrode dig points is reference
-    ref_dig_loc = [dl for dl in inst.info['dig'] if (
-                   dl['kind'] == FIFF.FIFFV_POINT_EEG and
-                   dl['ident'] == 0)]
-    if len(ref_channels) > 1 or len(ref_dig_loc) != len(ref_channels):
+    # only do this if we actually have digitisation points
+    if inst.info.get('dig', None) is not None:
+        # "zeroth" EEG electrode dig points is reference
+        ref_dig_loc = [dl for dl in inst.info['dig'] if (
+                       dl['kind'] == FIFF.FIFFV_POINT_EEG and
+                       dl['ident'] == 0)]
+        if len(ref_channels) > 1 or len(ref_dig_loc) != len(ref_channels):
+            ref_dig_array = np.zeros(12)
+            warn('The locations of multiple reference channels are ignored '
+                 '(set to zero).')
+        else:  # n_ref_channels == 1 and a single ref digitization exists
+            ref_dig_array = np.concatenate((ref_dig_loc[0]['r'],
+                                           ref_dig_loc[0]['r'], np.zeros(6)))
+            # Replace the (possibly new) Ref location for each channel
+            for idx in pick_types(inst.info, meg=False, eeg=True, exclude=[]):
+                inst.info['chs'][idx]['loc'][3:6] = ref_dig_loc[0]['r']
+    else:
+        # we should actually be able to do this from the montage, but
+        # it looks like the montage isn't stored, so we can't extract
+        # this information. The user will just have to call set_montage()
+        # by setting this to zero, we fall back to the old behavior
+        # when missing digitisation
         ref_dig_array = np.zeros(12)
-        warn('The locations of multiple reference channels are ignored '
-             '(set to zero).')
-    else:  # n_ref_channels == 1 and a single ref digitization exists
-        ref_dig_array = np.concatenate((ref_dig_loc[0]['r'],
-                                       ref_dig_loc[0]['r'], np.zeros(6)))
-        # Replace the (possibly new) Ref location for each channel
-        for idx in pick_types(inst.info, meg=False, eeg=True, exclude=[]):
-            inst.info['chs'][idx]['loc'][3:6] = ref_dig_loc[0]['r']
 
     for ch in ref_channels:
         chan_info = {'ch_name': ch,
@@ -233,11 +242,12 @@ def set_eeg_reference(inst, ref_channels=None, copy=True):
     inst : instance of Raw | Epochs | Evoked
         Instance of Raw or Epochs with EEG channels and reference channel(s).
     ref_channels : list of str | None
-        The names of the channels to use to construct the reference. If None is
-        specified here, an average reference will be applied in the form of an
-        SSP projector. If an empty list is specified, the data is assumed to
-        already have a proper reference and MNE will not attempt any
-        re-referencing of the data. Defaults to an average reference (None).
+        The names of the channels to use to construct the reference. If
+        None (default), an average reference will be added as an SSP
+        projector but not immediately applied to the data. If an empty list
+        is specified, the data is assumed to already have a proper reference
+        and MNE will not attempt any re-referencing of the data. Defaults
+        to an average reference (None).
     copy : bool
         Specifies whether the data will be copied (True) or modified in place
         (False). Defaults to True.
@@ -245,9 +255,12 @@ def set_eeg_reference(inst, ref_channels=None, copy=True):
     Returns
     -------
     inst : instance of Raw | Epochs | Evoked
-        Data with EEG channels re-referenced.
+        Data with EEG channels re-referenced. For ``ref_channels=None``,
+        an average projector will be added instead of directly subtarcting
+        data.
     ref_data : array
-        Array of reference data subtracted from EEG channels.
+        Array of reference data subtracted from EEG channels. This will
+        be None for an average reference.
 
     Notes
     -----
@@ -274,7 +287,6 @@ def set_eeg_reference(inst, ref_channels=None, copy=True):
                  'has been left untouched.')
             return inst, None
         else:
-            inst.info['custom_ref_applied'] = False
             inst.add_proj(make_eeg_average_ref_proj(inst.info, activate=False))
             return inst, None
     else:

@@ -6,6 +6,7 @@
 
 # License: BSD (3-clause)
 
+from functools import partial
 from math import factorial
 from os import path as op
 
@@ -25,7 +26,7 @@ from ..io.write import _generate_meas_id, _date_now
 from ..io import _loc_to_coil_trans, _BaseRaw
 from ..io.pick import pick_types, pick_info, pick_channels
 from ..utils import verbose, logger, _clean_names, warn, _time_mask
-from ..fixes import _get_args, partial, in1d, _safe_svd
+from ..fixes import _get_args, _safe_svd
 from ..externals.six import string_types
 from ..channels.channels import _get_T1T2_mag_inds
 
@@ -750,6 +751,11 @@ def _check_pos(pos, head_frame, raw, st_fixed, sfreq):
         raise ValueError('Head position time points must be greater than '
                          'first sample offset, but found %0.4f < %0.4f'
                          % (t[0], t_off))
+    max_dist = np.sqrt(np.sum(pos[:, 4:7] ** 2, axis=1)).max()
+    if max_dist > 1.:
+        warn('Found a distance greater than 1 m (%0.3g m) from the device '
+             'origin, positions may be invalid and Maxwell filtering could '
+             'fail' % (max_dist,))
     dev_head_ts = np.zeros((len(t), 4, 4))
     dev_head_ts[:, 3, 3] = 1.
     dev_head_ts[:, :3, 3] = pos[:, 4:7]
@@ -1697,10 +1703,10 @@ def _update_sensor_geometry(info, fine_cal, ignore_ref):
             % sorted(list(set(ch_names[pick] for pick in meg_picks) -
                           set(fine_cal['ch_names']))))
     rev_order = np.argsort(info_order)
-    rev_grad = rev_order[in1d(meg_picks,
-                              pick_types(info, meg='grad', exclude=()))]
-    rev_mag = rev_order[in1d(meg_picks,
-                             pick_types(info, meg='mag', exclude=()))]
+    rev_grad = rev_order[np.in1d(meg_picks,
+                                 pick_types(info, meg='grad', exclude=()))]
+    rev_mag = rev_order[np.in1d(meg_picks,
+                                pick_types(info, meg='mag', exclude=()))]
 
     # Determine gradiometer imbalances and magnetometer calibrations
     grad_imbalances = np.array([fine_cal['imb_cals'][ri] for ri in rev_grad]).T

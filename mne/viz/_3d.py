@@ -716,20 +716,22 @@ def plot_source_estimates(stc, subject=None, surface='inflated', hemi='lh',
                           "using:\n\n    $ pip install -U pysurfer" %
                           surfer.__version__)
 
+    if time_unit is None:
+        if initial_time is not None:
+            warn("The time_unit parameter default will change from 'ms' to "
+                 "'s' in MNE 0.14 and be removed in 0.15. To avoid this "
+                 "warning specify the parameter explicitly.",
+                 DeprecationWarning)
+        time_unit = 'ms'
+    elif time_unit not in ('s', 'ms'):
+        raise ValueError("time_unit needs to be 's' or 'ms', got %r" %
+                         (time_unit,))
+
     if initial_time is not None and surfer_version > v06:
         kwargs = {'initial_time': initial_time}
         initial_time = None  # don't set it twice
     else:
         kwargs = {}
-
-    if time_unit is None:
-        warn("The time_unit parameter default will change from 'ms' to 's' "
-             "in MNE 0.14. To avoid this warning specify the parameter "
-             "explicitly.", DeprecationWarning)
-        time_unit = 'ms'
-    elif time_unit not in ('s', 'ms'):
-        raise ValueError("time_unit needs to be 's' or 'ms', got %r" %
-                         (time_unit,))
 
     if time_label == 'auto':
         if time_unit == 'ms':
@@ -779,9 +781,11 @@ def plot_source_estimates(stc, subject=None, surface='inflated', hemi='lh',
 
     title = subject if len(hemis) > 1 else '%s - %s' % (subject, hemis[0])
     with warnings.catch_warnings(record=True):  # traits warnings
-        brain = Brain(subject, hemi, surface, True, title, cortex, size,
-                      background, foreground, figure, subjects_dir, views,
-                      config_opts=config_opts)
+        brain = Brain(subject, hemi=hemi, surf=surface, curv=True,
+                      title=title, cortex=cortex, size=size,
+                      background=background, foreground=foreground,
+                      figure=figure, subjects_dir=subjects_dir,
+                      views=views, config_opts=config_opts)
 
     if time_unit == 's':
         times = stc.times

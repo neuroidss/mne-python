@@ -22,7 +22,7 @@ def infomax(data, weights=None, l_rate=None, block=None, w_change=1e-12,
     Parameters
     ----------
     data : np.ndarray, shape (n_samples, n_features)
-        The data to unmix.
+        The whitened data to unmix.
     weights : np.ndarray, shape (n_features, n_features)
         The initialized unmixing matrix.
         Defaults to None, which means the identity matrix is used.
@@ -95,7 +95,7 @@ def infomax(data, weights=None, l_rate=None, block=None, w_change=1e-12,
     References
     ----------
     [1] A. J. Bell, T. J. Sejnowski. An information-maximization approach to
-        blind separation and bind deconvolution. Neural Computation, 7(6),
+        blind separation and blind deconvolution. Neural Computation, 7(6),
         1129-1159, 1995.
     [2] T. W. Lee, M. Girolami, T. J. Sejnowski. Independent component analysis
         using an extended infomax algorithm for mixed subgaussian and

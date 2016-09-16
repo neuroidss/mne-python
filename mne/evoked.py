@@ -15,7 +15,6 @@ from .channels.channels import (ContainsMixin, UpdateChannelsMixin,
                                 SetChannelsMixin, InterpolationMixin,
                                 equalize_channels)
 from .filter import resample, detrend, FilterMixin
-from .fixes import in1d
 from .utils import (check_fname, logger, verbose, _time_mask, warn, sizeof_fmt,
                     deprecated, SizeMixin, copy_function_doc_to_method_doc)
 from .viz import (plot_evoked, plot_evoked_topomap, plot_evoked_field,
@@ -35,7 +34,7 @@ from .io.proj import ProjMixin
 from .io.write import (start_file, start_block, end_file, end_block,
                        write_int, write_string, write_float_matrix,
                        write_id)
-from .io.base import ToDataFrameMixin, TimeMixin
+from .io.base import ToDataFrameMixin, TimeMixin, _check_maxshield
 
 _aspect_dict = {'average': FIFF.FIFFV_ASPECT_AVERAGE,
                 'standard_error': FIFF.FIFFV_ASPECT_STD_ERR}
@@ -71,6 +70,11 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     kind : str
         Either 'average' or 'standard_error'. The type of data to read.
         Only used if 'condition' is a str.
+    allow_maxshield : bool | str (default False)
+        If True, allow loading of data that has been processed with
+        Maxshield. Maxshield-processed data should generally
+        not be loaded directly, but should be processed using SSS first.
+        Can also be "yes" to load without eliciting a warning.
     verbose : bool, str, int, or None
         If not None, override default verbose level (see mne.verbose).
 
@@ -104,13 +108,13 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     """
     @verbose
     def __init__(self, fname, condition=None, baseline=None, proj=True,
-                 kind='average', verbose=None):
+                 kind='average', allow_maxshield=False, verbose=None):
         if not isinstance(proj, bool):
             raise ValueError(r"'proj' must be 'True' or 'False'")
         # Read the requested data
         self.info, self.nave, self._aspect_kind, self.first, self.last, \
             self.comment, self.times, self.data = _read_evoked(
-                fname, condition, kind)
+                fname, condition, kind, allow_maxshield)
         self.kind = _aspect_rev.get(str(self._aspect_kind), 'Unknown')
         self.verbose = verbose
         # project and baseline correct
@@ -125,13 +129,14 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         Parameters
         ----------
         baseline : tuple of length 2
-            The time interval to apply rescaling / baseline correction.
-            If None do not apply it. If baseline is (a, b)
-            the interval is between "a (s)" and "b (s)".
-            If a is None the beginning of the data is used
-            and if b is None then b is set to the end of the interval.
-            If baseline is equal to (None, None) all the time
-            interval is used. If None, no correction is applied.
+            The time interval to apply baseline correction. If None do not
+            apply it. If baseline is (a, b) the interval is between "a (s)" and
+            "b (s)". If a is None the beginning of the data is used and if b is
+            None then b is set to the end of the interval. If baseline is equal
+            to (None, None) all the time interval is used. Correction is
+            applied by computing mean of the baseline period and subtracting it
+            from the data. The baseline (a, b) includes both endpoints, i.e.
+            all timepoints t such that a <= t <= b.
         verbose : bool, str, int, or None
             If not None, override default verbose level (see mne.verbose).
 
@@ -757,7 +762,7 @@ class EvokedArray(Evoked):
         self._aspect_kind = _aspect_dict[self.kind]
 
 
-def _get_entries(fid, evoked_node):
+def _get_entries(fid, evoked_node, allow_maxshield=False):
     """Helper to get all evoked entries"""
     comments = list()
     aspect_kinds = list()
@@ -768,7 +773,7 @@ def _get_entries(fid, evoked_node):
             if my_kind == FIFF.FIFF_COMMENT:
                 tag = read_tag(fid, pos)
                 comments.append(tag.data)
-        my_aspect = dir_tree_find(ev, FIFF.FIFFB_ASPECT)[0]
+        my_aspect = _get_aspect(ev, allow_maxshield)[0]
         for k in range(my_aspect['nent']):
             my_kind = my_aspect['directory'][k].kind
             pos = my_aspect['directory'][k].pos
@@ -785,6 +790,19 @@ def _get_entries(fid, evoked_node):
     t = ['"' + c + '" (' + tt + ')' for tt, c in zip(t, comments)]
     t = '  ' + '\n  '.join(t)
     return comments, aspect_kinds, t
+
+
+def _get_aspect(evoked, allow_maxshield):
+    """Get Evoked data aspect."""
+    is_maxshield = False
+    aspect = dir_tree_find(evoked, FIFF.FIFFB_ASPECT)
+    if len(aspect) == 0:
+        _check_maxshield(allow_maxshield)
+        aspect = dir_tree_find(evoked, FIFF.FIFFB_SMSH_ASPECT)
+        is_maxshield = True
+    if len(aspect) > 1:
+        logger.info('Multiple data aspects found. Taking first one.')
+    return aspect[0], is_maxshield
 
 
 def _get_evoked_node(fname):
@@ -928,7 +946,7 @@ def combine_evoked(all_evoked, weights=None):
 
 @verbose
 def read_evokeds(fname, condition=None, baseline=None, kind='average',
-                 proj=True, verbose=None):
+                 proj=True, allow_maxshield=False, verbose=None):
     """Read evoked dataset(s)
 
     Parameters
@@ -942,13 +960,21 @@ def read_evokeds(fname, condition=None, baseline=None, kind='average',
     baseline : None (default) or tuple of length 2
         The time interval to apply baseline correction. If None do not apply
         it. If baseline is (a, b) the interval is between "a (s)" and "b (s)".
-        If a is None the beginning of the data is used and if b is None then
-        b is set to the end of the interval. If baseline is equal to
-        (None, None) all the time interval is used.
+        If a is None the beginning of the data is used and if b is None then b
+        is set to the end of the interval. If baseline is equal to (None, None)
+        all the time interval is used. Correction is applied by computing mean
+        of the baseline period and subtracting it from the data. The baseline
+        (a, b) includes both endpoints, i.e. all timepoints t such that
+        a <= t <= b.
     kind : str
         Either 'average' or 'standard_error', the type of data to read.
     proj : bool
         If False, available projectors won't be applied to the data.
+    allow_maxshield : bool | str (default False)
+        If True, allow loading of data that has been processed with
+        Maxshield. Maxshield-processed data should generally
+        not be loaded directly, but should be processed using SSS first.
+        Can also be "yes" to load without eliciting a warning.
     verbose : bool, str, int, or None
         If not None, override default verbose level (see mne.verbose).
 
@@ -973,13 +999,14 @@ def read_evokeds(fname, condition=None, baseline=None, kind='average',
         return_list = False
 
     out = [Evoked(fname, c, kind=kind, proj=proj,
+                  allow_maxshield=allow_maxshield,
                   verbose=verbose).apply_baseline(baseline)
            for c in condition]
 
     return out if return_list else out[0]
 
 
-def _read_evoked(fname, condition=None, kind='average'):
+def _read_evoked(fname, condition=None, kind='average', allow_maxshield=False):
     """Read evoked data from a FIF file"""
     if fname is None:
         raise ValueError('No evoked filename specified')
@@ -1005,10 +1032,10 @@ def _read_evoked(fname, condition=None, kind='average'):
                 raise ValueError('kind must be "average" or '
                                  '"standard_error"')
 
-            comments, aspect_kinds, t = _get_entries(fid, evoked_node)
-            goods = np.logical_and(in1d(comments, [condition]),
-                                   in1d(aspect_kinds,
-                                        [_aspect_dict[kind]]))
+            comments, aspect_kinds, t = _get_entries(fid, evoked_node,
+                                                     allow_maxshield)
+            goods = (np.in1d(comments, [condition]) &
+                     np.in1d(aspect_kinds, [_aspect_dict[kind]]))
             found_cond = np.where(goods)[0]
             if len(found_cond) != 1:
                 raise ValueError('condition "%s" (%s) not found, out of '
@@ -1017,7 +1044,8 @@ def _read_evoked(fname, condition=None, kind='average'):
             condition = found_cond[0]
         elif condition is None:
             if len(evoked_node) > 1:
-                _, _, conditions = _get_entries(fid, evoked_node)
+                _, _, conditions = _get_entries(fid, evoked_node,
+                                                allow_maxshield)
                 raise TypeError("Evoked file has more than one "
                                 "conditions, the condition parameters "
                                 "must be specified from:\n%s" % conditions)
@@ -1030,10 +1058,7 @@ def _read_evoked(fname, condition=None, kind='average'):
         my_evoked = evoked_node[condition]
 
         # Identify the aspects
-        aspects = dir_tree_find(my_evoked, FIFF.FIFFB_ASPECT)
-        if len(aspects) > 1:
-            logger.info('Multiple aspects found. Taking first one.')
-        my_aspect = aspects[0]
+        my_aspect, info['maxshield'] = _get_aspect(my_evoked, allow_maxshield)
 
         # Now find the data in the evoked block
         nchan = 0
@@ -1207,7 +1232,11 @@ def _write_evokeds(fname, evoked, check=True):
             write_int(fid, FIFF.FIFF_LAST_SAMPLE, e.last)
 
             # The epoch itself
-            start_block(fid, FIFF.FIFFB_ASPECT)
+            if e.info.get('maxshield'):
+                aspect = FIFF.FIFFB_SMSH_ASPECT
+            else:
+                aspect = FIFF.FIFFB_ASPECT
+            start_block(fid, aspect)
 
             write_int(fid, FIFF.FIFF_ASPECT_KIND, e._aspect_kind)
             write_int(fid, FIFF.FIFF_NAVE, e.nave)
@@ -1218,7 +1247,7 @@ def _write_evokeds(fname, evoked, check=True):
                                   e.info['chs'][k].get('scale', 1.0))
 
             write_float_matrix(fid, FIFF.FIFF_EPOCH, decal * e.data)
-            end_block(fid, FIFF.FIFFB_ASPECT)
+            end_block(fid, aspect)
             end_block(fid, FIFF.FIFFB_EVOKED)
 
         end_block(fid, FIFF.FIFFB_PROCESSED_DATA)

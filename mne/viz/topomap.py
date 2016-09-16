@@ -773,7 +773,8 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
                         layout=None, vmin=None, vmax=None, cmap='RdBu_r',
                         sensors=True, colorbar=False, title=None,
                         show=True, outlines='head', contours=6,
-                        image_interp='bilinear', head_pos=None):
+                        image_interp='bilinear', head_pos=None,
+                        inst=None):
     """Project unmixing matrix on interpolated sensor topogrpahy.
 
     Parameters
@@ -846,12 +847,19 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
         the head circle. If dict, can have entries 'center' (tuple) and
         'scale' (tuple) for what the center and scale of the head should be
         relative to the electrode locations.
+    inst : Raw | Epochs | None
+        To be able to see component properties after clicking on component
+        topomap you need to pass relevant data - instances of Raw or Epochs
+        (for example the data that ICA was trained on). This takes effect
+        only when running matplotlib in interactive mode.
 
     Returns
     -------
     fig : instance of matplotlib.pyplot.Figure or list
         The figure object(s).
     """
+    from ..io import _BaseRaw
+    from ..epochs import _BaseEpochs
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid import make_axes_locatable
     from ..channels import _get_ch_type
@@ -869,7 +877,8 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
                                       colorbar=colorbar, title=title,
                                       show=show, outlines=outlines,
                                       contours=contours,
-                                      image_interp=image_interp)
+                                      image_interp=image_interp,
+                                      head_pos=head_pos, inst=inst)
             figs.append(fig)
         return figs
     elif np.isscalar(picks):
@@ -879,12 +888,7 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
     if cmap == 'interactive':
         cmap = ('RdBu_r', True)
     elif not isinstance(cmap, tuple):
-        if len(picks) > 2:
-            warn('Disabling interactive colorbar for multiple axes. Turn '
-                 'interactivity on explicitly by passing cmap as a tuple.')
-            cmap = (cmap, False)
-        else:
-            cmap = (cmap, True)
+        cmap = (cmap, False if len(picks) > 2 else True)
     data = np.dot(ica.mixing_matrix_[:, picks].T,
                   ica.pca_components_[:ica.n_components_])
 
@@ -919,6 +923,7 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
                           res=res, axes=ax, cmap=cmap[0], outlines=outlines,
                           image_mask=image_mask, contours=contours,
                           image_interp=image_interp, show=False)[0]
+        im.axes.set_label('IC #%03d' % ii)
         if colorbar:
             divider = make_axes_locatable(ax)
             cax = divider.append_axes("right", size="5%", pad=0.05)
@@ -932,6 +937,15 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
     tight_layout(fig=fig)
     fig.subplots_adjust(top=0.95)
     fig.canvas.draw()
+    if isinstance(inst, (_BaseRaw, _BaseEpochs)):
+        def onclick(event, ica=ica, inst=inst):
+            # check which component to plot
+            label = event.inaxes.get_label()
+            if 'IC #' in label:
+                ic = int(label[4:])
+                ica.plot_properties(inst, picks=ic, show=True)
+        fig.canvas.mpl_connect('button_press_event', onclick)
+
     plt_show(show)
     return fig
 
@@ -1381,12 +1395,7 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
     if cmap == 'interactive':
         cmap = (None, True)
     elif not isinstance(cmap, tuple):
-        if len(times) > 2:
-            warn('Disabling interactive colorbar for multiple axes. Turn '
-                 'interactivity on explicitly by passing cmap as a tuple.')
-            cmap = (cmap, False)
-        else:
-            cmap = (cmap, True)
+        cmap = (cmap, False if len(times) > 2 else True)
     for idx, time in enumerate(times):
         tp, cn = plot_topomap(data[:, idx], pos, vmin=vmin, vmax=vmax,
                               sensors=sensors, res=res, names=names,
