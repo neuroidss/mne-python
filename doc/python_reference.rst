@@ -1,3 +1,5 @@
+:orphan:
+
 .. _api_reference:
 
 ====================
@@ -21,6 +23,10 @@ Classes
 
 .. currentmodule:: mne
 
+.. automodule:: mne
+   :no-members:
+   :no-inherited-members:
+
 .. autosummary::
    :toctree: generated/
    :template: class.rst
@@ -28,7 +34,10 @@ Classes
    io.Raw
    io.RawFIF
    io.RawArray
+   io.BaseRaw
    Annotations
+   AcqParserFIF
+   BaseEpochs
    Epochs
    Evoked
    SourceSpaces
@@ -48,12 +57,12 @@ Classes
    preprocessing.ICA
    preprocessing.Xdawn
    decoding.CSP
-   decoding.EpochsVectorizer
    decoding.FilterEstimator
-   decoding.GeneralizationAcrossTime
    decoding.PSDEstimator
+   decoding.ReceptiveField
    decoding.Scaler
-   decoding.TimeDecoding
+   decoding.SlidingEstimator
+   decoding.GeneralizingEstimator
    realtime.RtEpochs
    realtime.RtClient
    realtime.MockRtClient
@@ -72,16 +81,18 @@ Logging and Configuration
 
    get_config_path
    get_config
+   open_docs
    set_log_level
    set_log_file
    set_config
    sys_info
+   verbose
 
 :py:mod:`mne.cuda`:
 
 .. automodule:: mne.cuda
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.cuda
 
@@ -98,13 +109,9 @@ Reading raw data
 
 .. currentmodule:: mne.io
 
-Classes:
-
-.. autosummary::
-   :toctree: generated/
-   :template: class.rst
-
-   Raw
+.. automodule:: mne.io
+   :no-members:
+   :no-inherited-members:
 
 Functions:
 
@@ -112,6 +119,8 @@ Functions:
   :toctree: generated/
   :template: function.rst
 
+  anonymize_info
+  read_raw_artemis123
   read_raw_bti
   read_raw_cnt
   read_raw_ctf
@@ -124,6 +133,10 @@ Functions:
   read_raw_fif
 
 .. currentmodule:: mne.io.kit
+
+.. automodule:: mne.io.kit
+   :no-members:
+   :no-inherited-members:
 
 :py:mod:`mne.io.kit`:
 
@@ -148,6 +161,7 @@ Functions:
    get_head_surf
    get_meg_helmet_surf
    get_volume_labels_from_aseg
+   get_volume_labels_from_src
    parse_config
    read_labels_from_annot
    read_bem_solution
@@ -157,6 +171,7 @@ Functions:
    read_epochs
    read_epochs_kit
    read_epochs_eeglab
+   read_events_eeglab
    read_events
    read_evokeds
    read_forward_solution
@@ -224,30 +239,30 @@ Functions:
   create_info
 
 
-Sample datasets
-===============
+Datasets
+========
 
-:py:mod:`mne.datasets.sample`:
+:py:mod:`mne.datasets`:
 
-.. automodule:: mne.datasets.sample
- :no-members:
- :no-inherited-members:
+.. automodule:: mne.datasets
+   :no-members:
+   :no-inherited-members:
 
-.. currentmodule:: mne.datasets.sample
+.. currentmodule:: mne.datasets
 
 .. autosummary::
    :toctree: generated/
    :template: function.rst
 
-   data_path
+   fetch_hcp_mmp_parcellation
 
-:py:mod:`mne.datasets.spm_face`:
+:py:mod:`mne.datasets.sample`:
 
-.. automodule:: mne.datasets.spm_face
- :no-members:
- :no-inherited-members:
+.. automodule:: mne.datasets.sample
+   :no-members:
+   :no-inherited-members:
 
-.. currentmodule:: mne.datasets.spm_face
+.. currentmodule:: mne.datasets.sample
 
 .. autosummary::
    :toctree: generated/
@@ -258,8 +273,8 @@ Sample datasets
 :py:mod:`mne.datasets.brainstorm`:
 
 .. automodule:: mne.datasets.brainstorm
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.datasets.brainstorm
 
@@ -274,8 +289,8 @@ Sample datasets
 :py:mod:`mne.datasets.megsim`:
 
 .. automodule:: mne.datasets.megsim
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.datasets.megsim
 
@@ -286,6 +301,90 @@ Sample datasets
    data_path
    load_data
 
+:py:mod:`mne.datasets.spm_face`:
+
+.. automodule:: mne.datasets.spm_face
+   :no-members:
+   :no-inherited-members:
+
+.. currentmodule:: mne.datasets.spm_face
+
+.. autosummary::
+   :toctree: generated/
+   :template: function.rst
+
+   data_path
+
+:py:mod:`mne.datasets.eegbci`:
+
+.. automodule:: mne.datasets.eegbci
+   :no-members:
+   :no-inherited-members:
+
+.. currentmodule:: mne.datasets.eegbci
+
+.. autosummary::
+   :toctree: generated/
+   :template: function.rst
+
+   load_data
+
+:py:mod:`mne.datasets.somato`:
+
+.. automodule:: mne.datasets.somato
+   :no-members:
+   :no-inherited-members:
+
+.. currentmodule:: mne.datasets.somato
+
+.. autosummary::
+   :toctree: generated/
+   :template: function.rst
+
+   data_path
+
+:py:mod:`mne.datasets.multimodal`:
+
+.. automodule:: mne.datasets.multimodal
+   :no-members:
+   :no-inherited-members:
+
+.. currentmodule:: mne.datasets.multimodal
+
+.. autosummary::
+   :toctree: generated/
+   :template: function.rst
+
+   data_path
+
+:py:mod:`mne.datasets.visual_92_categories`:
+
+.. automodule:: mne.datasets.visual_92_categories
+   :no-members:
+   :no-inherited-members:
+
+.. currentmodule:: mne.datasets.visual_92_categories
+
+.. autosummary::
+   :toctree: generated/
+   :template: function.rst
+
+   data_path
+
+:py:mod:`mne.datasets.mtrf`:
+
+.. automodule:: mne.datasets.mtrf
+ :no-members:
+ :no-inherited-members:
+
+.. currentmodule:: mne.datasets.mtrf
+
+.. autosummary::
+   :toctree: generated/
+   :template: function.rst
+
+   data_path
+
 
 Visualization
 =============
@@ -293,8 +392,8 @@ Visualization
 :py:mod:`mne.viz`:
 
 .. automodule:: mne.viz
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.viz
 
@@ -312,6 +411,8 @@ Functions:
    :toctree: generated/
    :template: function.rst
 
+   add_background_image
+   compare_fiff
    circular_layout
    mne_analyze_colormap
    plot_bem
@@ -329,6 +430,9 @@ Functions:
    plot_evoked_joint
    plot_evoked_field
    plot_evoked_white
+   plot_filter
+   plot_head_positions
+   plot_ideal_filter
    plot_compare_evokeds
    plot_ica_sources
    plot_ica_components
@@ -349,8 +453,7 @@ Functions:
    plot_topo_image_epochs
    plot_topomap
    plot_trans
-   compare_fiff
-   add_background_image
+   snapshot_brain_montage
 
 .. currentmodule:: mne.io
 
@@ -376,6 +479,14 @@ Projections:
    compute_proj_raw
    read_proj
    write_proj
+
+.. currentmodule:: mne.preprocessing
+
+.. autosummary::
+   :toctree: generated/
+   :template: function.rst
+
+   fix_stim_artifact
 
 .. currentmodule:: mne.preprocessing.ssp
 
@@ -420,8 +531,8 @@ Functions:
 :py:mod:`mne.preprocessing`:
 
 .. automodule:: mne.preprocessing
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.preprocessing
 
@@ -437,6 +548,7 @@ Functions:
    find_eog_events
    ica_find_ecg_events
    ica_find_eog_events
+   infomax
    maxwell_filter
    read_ica
    run_ica
@@ -457,8 +569,8 @@ EEG referencing:
 :py:mod:`mne.filter`:
 
 .. automodule:: mne.filter
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.filter
 
@@ -466,13 +578,12 @@ EEG referencing:
    :toctree: generated/
    :template: function.rst
 
-   band_pass_filter
    construct_iir_filter
+   create_filter
    estimate_ringing_samples
    filter_data
-   high_pass_filter
-   low_pass_filter
    notch_filter
+   resample
 
 Head position estimation:
 
@@ -534,6 +645,7 @@ Events
    average_movements
    combine_event_ids
    equalize_epoch_counts
+
 
 Sensor Space Data
 =================
@@ -652,6 +764,8 @@ Functions:
    :toctree: generated/
    :template: function.rst
 
+   fit_sphere_to_headshape
+   get_fitting_dig
    make_watershed_bem
    make_flash_bem
    convert_flash_mris
@@ -665,14 +779,30 @@ Functions:
    restrict_forward_to_label
    restrict_forward_to_stc
 
+.. currentmodule:: mne.transforms
+
+.. autosummary::
+   :toctree: generated/
+   :template: class.rst
+
+   Transform
+
+.. currentmodule:: mne.surface
+
+.. autosummary::
+   :toctree: generated/
+   :template: function.rst
+
+   complete_surface_info
+
 Inverse Solutions
 =================
 
 :py:mod:`mne.minimum_norm`:
 
 .. automodule:: mne.minimum_norm
-  :no-members:
-  :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.minimum_norm
 
@@ -708,8 +838,8 @@ Functions:
 :py:mod:`mne.inverse_sparse`:
 
 .. automodule:: mne.inverse_sparse
-  :no-members:
-  :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.inverse_sparse
 
@@ -724,8 +854,8 @@ Functions:
 :py:mod:`mne.beamformer`:
 
 .. automodule:: mne.beamformer
-  :no-members:
-  :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.beamformer
 
@@ -740,6 +870,8 @@ Functions:
    dics_epochs
    dics_source_power
    rap_music
+   tf_dics
+   tf_lcmv
 
 :py:mod:`mne`:
 
@@ -754,6 +886,10 @@ Functions:
    fit_dipole
 
 :py:mod:`mne.dipole`:
+
+.. automodule:: mne.dipole
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.dipole
 
@@ -802,8 +938,8 @@ Time-Frequency
 :py:mod:`mne.time_frequency`:
 
 .. automodule:: mne.time_frequency
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.time_frequency
 
@@ -829,6 +965,9 @@ Functions that operate on mne-python objects:
    tfr_morlet
    tfr_multitaper
    tfr_stockwell
+   tfr_array_morlet
+   tfr_array_multitaper
+   tfr_array_stockwell
    read_tfrs
    write_tfrs
 
@@ -839,20 +978,20 @@ Functions that operate on ``np.ndarray`` objects:
    :template: function.rst
 
    csd_array
-   cwt_morlet
    dpss_windows
    morlet
-   single_trial_power
    stft
    istft
    stftfreq
+   psd_array_multitaper
+   psd_array_welch
 
 
 :py:mod:`mne.time_frequency.tfr`:
 
 .. automodule:: mne.time_frequency.tfr
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.time_frequency.tfr
 
@@ -870,8 +1009,8 @@ Connectivity Estimation
 :py:mod:`mne.connectivity`:
 
 .. automodule:: mne.connectivity
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.connectivity
 
@@ -890,8 +1029,8 @@ Statistics
 :py:mod:`mne.stats`:
 
 .. automodule:: mne.stats
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.stats
 
@@ -909,6 +1048,7 @@ Statistics
    ttest_1samp_no_p
    linear_regression
    linear_regression_raw
+   f_oneway
    f_mway_rm
    f_threshold_mway_rm
    summarize_clusters_stc
@@ -936,8 +1076,8 @@ Simulation
 :py:mod:`mne.simulation`:
 
 .. automodule:: mne.simulation
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.simulation
 
@@ -950,6 +1090,8 @@ Simulation
    simulate_stc
    simulate_sparse_stc
    select_source_in_label
+
+.. _api_decoding:
 
 Decoding
 ========
@@ -967,12 +1109,31 @@ Classes:
    :template: class.rst
 
    CSP
-   EpochsVectorizer
+   EMS
    FilterEstimator
-   GeneralizationAcrossTime
+   LinearModel
    PSDEstimator
    Scaler
-   TimeDecoding
+   TemporalFilter
+   TimeFrequency
+   UnsupervisedSpatialFilter
+   Vectorizer
+   ReceptiveField
+   TimeDelayingRidge
+   SlidingEstimator
+   GeneralizingEstimator
+
+Functions:
+
+Functions that assist with decoding and model fitting:
+
+.. autosummary::
+   :toctree: generated/
+   :template: function.rst
+
+   compute_ems
+   cross_val_multiscore
+   get_coef
 
 Realtime
 ========
@@ -1003,8 +1164,8 @@ MNE-Report
 :py:mod:`mne.report`:
 
 .. automodule:: mne.report
- :no-members:
- :no-inherited-members:
+   :no-members:
+   :no-inherited-members:
 
 .. currentmodule:: mne.report
 

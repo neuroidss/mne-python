@@ -14,6 +14,7 @@ from mne import (read_dipole, read_forward_solution,
                  pick_info, EvokedArray, read_source_spaces, make_ad_hoc_cov,
                  make_forward_solution, Dipole, DipoleFixed, Epochs,
                  make_fixed_length_events)
+from mne.dipole import get_phantom_dipoles
 from mne.simulation import simulate_evoked
 from mne.datasets import testing
 from mne.utils import (run_tests_if_main, _TempDir, slow_test, requires_mne,
@@ -83,8 +84,7 @@ def test_dipole_fitting_ctf():
     """Test dipole fitting with CTF data."""
     raw_ctf = read_raw_ctf(fname_ctf).set_eeg_reference()
     events = make_fixed_length_events(raw_ctf, 1)
-    evoked = Epochs(raw_ctf, events, 1, 0, 0, baseline=None,
-                    add_eeg_ref=False).average()
+    evoked = Epochs(raw_ctf, events, 1, 0, 0, baseline=None).average()
     cov = make_ad_hoc_cov(evoked.info)
     sphere = make_sphere_model((0., 0., 0.))
     # XXX Eventually we should do some better checks about accuracy, but
@@ -216,7 +216,9 @@ def test_dipole_fitting_fixed():
     assert_allclose(resid, resid_fixed[:, [t_idx]])
     _check_roundtrip_fixed(dip_fixed)
     # Degenerate conditions
-    assert_raises(ValueError, fit_dipole, evoked, cov, sphere, pos=[0])
+    evoked_nan = evoked.copy().crop(0, 0)
+    evoked_nan.data[0, 0] = None
+    assert_raises(ValueError, fit_dipole, evoked_nan, cov, sphere)
     assert_raises(ValueError, fit_dipole, evoked, cov, sphere, ori=[1, 0, 0])
     assert_raises(ValueError, fit_dipole, evoked, cov, sphere, pos=[0, 0, 0],
                   ori=[2, 0, 0])
@@ -243,7 +245,7 @@ def test_len_index_dipoles():
 def test_min_distance_fit_dipole():
     """Test dipole min_dist to inner_skull."""
     subject = 'sample'
-    raw = read_raw_fif(fname_raw, preload=True, add_eeg_ref=False)
+    raw = read_raw_fif(fname_raw, preload=True)
 
     # select eeg data
     picks = pick_types(raw.info, meg=False, eeg=True, exclude='bads')
@@ -334,6 +336,9 @@ def test_accuracy():
 def test_dipole_fixed():
     """Test reading a fixed-position dipole (from Xfit)."""
     dip = read_dipole(fname_xfit_dip)
+    # print the representation of the objet DipoleFixed
+    print(dip)
+
     _check_roundtrip_fixed(dip)
     with warnings.catch_warnings(record=True) as w:  # unused fields
         dip_txt = read_dipole(fname_xfit_dip_txt)
@@ -359,5 +364,16 @@ def _check_roundtrip_fixed(dip):
         for key in ('loc', 'kind', 'unit_mul', 'range', 'coord_frame', 'unit',
                     'cal', 'coil_type', 'scanno', 'logno'):
             assert_allclose(ch_1[key], ch_2[key], err_msg=key)
+
+
+def test_get_phantom_dipoles():
+    """Test getting phantom dipole locations."""
+    assert_raises(ValueError, get_phantom_dipoles, 0)
+    assert_raises(ValueError, get_phantom_dipoles, 'foo')
+    for kind in ('vectorview', 'otaniemi'):
+        pos, ori = get_phantom_dipoles(kind)
+        assert_equal(pos.shape, (32, 3))
+        assert_equal(ori.shape, (32, 3))
+
 
 run_tests_if_main(False)

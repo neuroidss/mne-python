@@ -3,20 +3,17 @@
 Decoding sensor space data with generalization across time and conditions
 =========================================================================
 
-This example runs the analysis computed in:
+This example runs the analysis described in [1]_. It illustrates how one can
+fit a linear classifier to identify a discriminatory topography at a given time
+instant and subsequently assess whether this linear model can accurately
+predict all of the time samples of a second set of conditions.
 
-Jean-Remi King, Alexandre Gramfort, Aaron Schurger, Lionel Naccache
-and Stanislas Dehaene, "Two distinct dynamic modes subtend the detection of
-unexpected sounds", PLOS ONE, 2013,
-http://www.ncbi.nlm.nih.gov/pubmed/24475052
+References
+----------
 
-King & Dehaene (2014) 'Characterizing the dynamics of mental
-representations: the temporal generalization method', Trends In Cognitive
-Sciences, 18(4), 203-210.
-http://www.ncbi.nlm.nih.gov/pubmed/24593982
-
-The idea is to learn at one time instant and assess if the decoder
-can predict accurately over time and on a second set of conditions.
+.. [1] King & Dehaene (2014) 'Characterizing the dynamics of mental
+       representations: the Temporal Generalization method', Trends In
+       Cognitive Sciences, 18(4), 203-210. doi: 10.1016/j.tics.2014.01.002.
 """
 # Authors: Jean-Remi King <jeanremi.king@gmail.com>
 #          Alexandre Gramfort <alexandre.gramfort@telecom-paristech.fr>
@@ -24,15 +21,15 @@ can predict accurately over time and on a second set of conditions.
 #
 # License: BSD (3-clause)
 
-import numpy as np
 import matplotlib.pyplot as plt
 
-import mne
-from mne.datasets import sample
-from mne.decoding.search_light import GeneralizationLight
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+
+import mne
+from mne.datasets import sample
+from mne.decoding import GeneralizingEstimator
 
 print(__doc__)
 
@@ -42,51 +39,41 @@ data_path = sample.data_path()
 raw_fname = data_path + '/MEG/sample/sample_audvis_filt-0-40_raw.fif'
 events_fname = data_path + '/MEG/sample/sample_audvis_filt-0-40_raw-eve.fif'
 raw = mne.io.read_raw_fif(raw_fname, preload=True)
-picks = mne.pick_types(raw.info, meg='mag')  # Pick magnetometers only
+picks = mne.pick_types(raw.info, meg=True, exclude='bads')  # Pick MEG channels
+raw.filter(1., 30., fir_design='firwin')  # Band pass filtering signals
 events = mne.read_events(events_fname)
-event_id = {'AudL': 1, 'AudR': 2, 'VisL': 3, 'VisR': 4}
+event_id = {'Auditory/Left': 1, 'Auditory/Right': 2,
+            'Visual/Left': 3, 'Visual/Right': 4}
+tmin = -0.050
+tmax = 0.400
 decim = 2  # decimate to make the example faster to run
-epochs = mne.Epochs(raw, events, event_id, -0.050, 0.400, proj=True,
-                    picks=picks, baseline=None, preload=True,
-                    decim=decim, verbose=False)
+epochs = mne.Epochs(raw, events, event_id=event_id, tmin=tmin, tmax=tmax,
+                    proj=True, picks=picks, baseline=None, preload=True,
+                    reject=dict(mag=5e-12), decim=decim)
 
 # We will train the classifier on all left visual vs auditory trials
 # and test on all right visual vs auditory trials.
+clf = make_pipeline(StandardScaler(), LogisticRegression())
+time_gen = GeneralizingEstimator(clf, scoring='roc_auc', n_jobs=1)
 
-# In this case, because the test data is independent from the train data,
-# we do not need a cross validation.
+# Fit classifiers on the epochs where the stimulus was presented to the left.
+# Note that the experimental condition y indicates auditory or visual
+time_gen.fit(X=epochs['Left'].get_data(),
+             y=epochs['Left'].events[:, 2] > 2)
 
-# Define events of interest
-triggers = epochs.events[:, 2]
+# Score on the epochs where the stimulus was presented to the right.
+scores = time_gen.score(X=epochs['Right'].get_data(),
+                        y=epochs['Right'].events[:, 2] > 2)
 
-
-# Each estimator fitted at each time point is an independent Scikit-Learn
-# pipeline with a ``fit``, and a ``score`` method.
-gat = GeneralizationLight(
-    make_pipeline(StandardScaler(), LogisticRegression()),
-    n_jobs=1)
-
-# Fit: for our left events, which ones are visual?
-X = epochs[('AudL', 'VisL')].get_data()
-y = triggers[np.in1d(triggers, (1, 3))] == 3
-gat.fit(X, y)
-
-# Generalize: for our right events, which ones are visual?
-X = epochs[('AudR', 'VisR')].get_data()
-y = triggers[np.in1d(triggers, (2, 4))] == 4
-score = gat.score(X, y)
-
-# Plot temporal generalization accuracies.
-extent = epochs.times[[0, -1, 0, -1]]
+# Plot
 fig, ax = plt.subplots(1)
-im = ax.matshow(score, origin='lower', cmap='RdBu_r', vmin=0., vmax=1.,
-                extent=extent)
-ticks = np.arange(0., .401, .100)
-ax.set_xticks(ticks)
-ax.set_xticklabels(ticks)
-ax.set_yticks(ticks)
-ax.set_yticklabels(ticks)
-ax.axvline(0, color='k')
-ax.axhline(0, color='k')
-plt.colorbar(im)
+im = ax.matshow(scores, vmin=0, vmax=1., cmap='RdBu_r', origin='lower',
+                extent=epochs.times[[0, -1, 0, -1]])
+ax.axhline(0., color='k')
+ax.axvline(0., color='k')
+ax.xaxis.set_ticks_position('bottom')
+ax.set_xlabel('Testing Time (s)')
+ax.set_ylabel('Training Time (s)')
+ax.set_title('Generalization across time and condition')
+plt.colorbar(im, ax=ax)
 plt.show()

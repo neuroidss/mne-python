@@ -57,7 +57,7 @@ raw = io.read_raw_ctf(raw_fname % 1)  # Take first run
 raw = raw.crop(0, 150.).load_data().resample(60, npad='auto')
 
 picks = mne.pick_types(raw.info, meg=True, exclude='bads')
-raw.filter(1, None, method='iir', n_jobs=1)
+raw.filter(1, None, n_jobs=1, fir_design='firwin')
 
 events = mne.find_events(raw, stim_channel='UPPT001')
 
@@ -69,8 +69,8 @@ reject = dict(mag=3e-12)
 # Make source space
 
 trans = data_path + '/MEG/spm/SPM_CTF_MEG_example_faces1_3D_raw-trans.fif'
-src = mne.setup_source_space('spm', fname=None, spacing='oct6',
-                             subjects_dir=subjects_dir, add_dist=False)
+src = mne.setup_source_space('spm', spacing='oct6', subjects_dir=subjects_dir,
+                             add_dist=False)
 bem = data_path + '/subjects/spm/bem/spm-5120-5120-5120-bem-sol.fif'
 forward = mne.make_forward_solution(raw.info, trans, src, bem)
 forward = mne.convert_forward_solution(forward, surf_ori=True)
@@ -100,7 +100,7 @@ for n_train in samples_epochs:
                               for id_ in [event_ids[k] for k in conditions]])
     epochs_train = mne.Epochs(raw, events_, event_ids, tmin, tmax, picks=picks,
                               baseline=baseline, preload=True, reject=reject)
-    epochs_train.equalize_event_counts(event_ids, copy=False)
+    epochs_train.equalize_event_counts(event_ids)
     assert len(epochs_train) == 2 * n_train
 
     noise_covs = compute_covariance(
@@ -155,8 +155,8 @@ for ni, (n_train, axes) in enumerate(zip(samples_epochs, (axes1, axes2))):
                                             methods_ordered[ni],
                                             ['best', 'worst'],
                                             colors):
-        brain = stc.plot(subjects_dir=subjects_dir, hemi='both', clim=clim)
-        brain.set_time(175)
+        brain = stc.plot(subjects_dir=subjects_dir, hemi='both', clim=clim,
+                         initial_time=0.175)
 
         im = brain_to_mpl(brain)
         brain.close()

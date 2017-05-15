@@ -7,15 +7,15 @@ import warnings
 import os.path as op
 import numpy as np
 
-from nose.tools import assert_true, assert_raises
-from numpy.testing import (assert_array_equal, assert_equal,
-                           assert_array_almost_equal)
+from nose.tools import assert_true, assert_raises, assert_equal
+from numpy.testing import (assert_array_equal, assert_array_almost_equal,
+                           assert_allclose)
 
 from mne import io, read_events, Epochs, pick_types
-from mne.decoding import Scaler, FilterEstimator
-from mne.decoding import (PSDEstimator, EpochsVectorizer, Vectorizer,
+from mne.decoding import (Scaler, FilterEstimator, PSDEstimator, Vectorizer,
                           UnsupervisedSpatialFilter, TemporalFilter)
-from mne.utils import requires_sklearn_0_15
+from mne.defaults import DEFAULTS
+from mne.utils import requires_sklearn_0_15, run_tests_if_main, check_version
 
 warnings.simplefilter('always')  # enable b/c these tests throw warnings
 
@@ -30,45 +30,73 @@ event_name = op.join(data_dir, 'test-eve.fif')
 
 def test_scaler():
     """Test methods of Scaler."""
-    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
+    raw = io.read_raw_fif(raw_fname)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
 
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True, add_eeg_ref=False)
+                    baseline=(None, 0), preload=True)
     epochs_data = epochs.get_data()
-    scaler = Scaler(epochs.info)
     y = epochs.events[:, -1]
 
-    # np invalid divide value warnings
-    with warnings.catch_warnings(record=True):
+    methods = (None, dict(mag=5, grad=10, eeg=20), 'mean', 'median')
+    infos = (epochs.info, epochs.info, None, None)
+    epochs_data_t = epochs_data.transpose([1, 0, 2])
+    for method, info in zip(methods, infos):
+        if method == 'median' and not check_version('sklearn', '0.17'):
+            assert_raises(ValueError, Scaler, info, method)
+            continue
+        if method == 'mean' and not check_version('sklearn', ''):
+            assert_raises(ImportError, Scaler, info, method)
+            continue
+        scaler = Scaler(info, method)
         X = scaler.fit_transform(epochs_data, y)
-        assert_true(X.shape == epochs_data.shape)
+        assert_equal(X.shape, epochs_data.shape)
+        if method is None or isinstance(method, dict):
+            sd = DEFAULTS['scalings'] if method is None else method
+            stds = np.zeros(len(picks))
+            for key in ('mag', 'grad'):
+                stds[pick_types(epochs.info, meg=key)] = 1. / sd[key]
+            stds[pick_types(epochs.info, meg=False, eeg=True)] = 1. / sd['eeg']
+            means = np.zeros(len(epochs.ch_names))
+        elif method == 'mean':
+            stds = np.array([np.std(ch_data) for ch_data in epochs_data_t])
+            means = np.array([np.mean(ch_data) for ch_data in epochs_data_t])
+        else:  # median
+            percs = np.array([np.percentile(ch_data, [25, 50, 75])
+                              for ch_data in epochs_data_t])
+            stds = percs[:, 2] - percs[:, 0]
+            means = percs[:, 1]
+        assert_allclose(X * stds[:, np.newaxis] + means[:, np.newaxis],
+                        epochs_data, rtol=1e-12, atol=1e-20, err_msg=method)
+
         X2 = scaler.fit(epochs_data, y).transform(epochs_data)
+        assert_array_equal(X, X2)
 
-    assert_array_equal(X2, X)
-
-    # Test inverse_transform
-    with warnings.catch_warnings(record=True):  # invalid value in mult
-        Xi = scaler.inverse_transform(X, y)
-    assert_array_equal(epochs_data, Xi)
+        # inverse_transform
+        Xi = scaler.inverse_transform(X)
+        assert_array_almost_equal(epochs_data, Xi)
 
     # Test init exception
     assert_raises(ValueError, scaler.fit, epochs, y)
     assert_raises(ValueError, scaler.transform, epochs, y)
+    epochs_bad = Epochs(raw, events, event_id, 0, 0.01,
+                        picks=np.arange(len(raw.ch_names)))  # non-data chs
+    scaler = Scaler(epochs_bad.info, None)
+    assert_raises(ValueError, scaler.fit, epochs_bad.get_data(), y)
 
 
 def test_filterestimator():
     """Test methods of FilterEstimator."""
-    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
+    raw = io.read_raw_fif(raw_fname)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True, add_eeg_ref=False)
+                    baseline=(None, 0), preload=True)
     epochs_data = epochs.get_data()
 
     # Add tests for different combinations of l_freq and h_freq
@@ -106,13 +134,13 @@ def test_filterestimator():
 
 def test_psdestimator():
     """Test methods of PSDEstimator."""
-    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
+    raw = io.read_raw_fif(raw_fname)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True, add_eeg_ref=False)
+                    baseline=(None, 0), preload=True)
     epochs_data = epochs.get_data()
     psd = PSDEstimator(2 * np.pi, 0, np.inf)
     y = epochs.events[:, -1]
@@ -124,48 +152,6 @@ def test_psdestimator():
     # Test init exception
     assert_raises(ValueError, psd.fit, epochs, y)
     assert_raises(ValueError, psd.transform, epochs, y)
-
-
-def test_epochs_vectorizer():
-    """Test methods of EpochsVectorizer."""
-    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
-    events = read_events(event_name)
-    picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
-                       eog=False, exclude='bads')
-    picks = picks[1:13:3]
-    with warnings.catch_warnings(record=True):
-        epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                        baseline=(None, 0), preload=True, add_eeg_ref=False)
-    epochs_data = epochs.get_data()
-    with warnings.catch_warnings(record=True):  # deprecation
-        vector = EpochsVectorizer(epochs.info)
-    y = epochs.events[:, -1]
-    X = vector.fit_transform(epochs_data, y)
-
-    # Check data dimensions
-    assert_true(X.shape[0] == epochs_data.shape[0])
-    assert_true(X.shape[1] == epochs_data.shape[1] * epochs_data.shape[2])
-
-    assert_array_equal(vector.fit(epochs_data, y).transform(epochs_data), X)
-
-    # Check if data is preserved
-    n_times = epochs_data.shape[2]
-    assert_array_equal(epochs_data[0, 0, 0:n_times], X[0, 0:n_times])
-
-    # Check inverse transform
-    Xi = vector.inverse_transform(X, y)
-    assert_true(Xi.shape[0] == epochs_data.shape[0])
-    assert_true(Xi.shape[1] == epochs_data.shape[1])
-    assert_array_equal(epochs_data[0, 0, 0:n_times], Xi[0, 0, 0:n_times])
-
-    # check if inverse transform works with different number of epochs
-    Xi = vector.inverse_transform(epochs_data[0], y)
-    assert_true(Xi.shape[1] == epochs_data.shape[1])
-    assert_true(Xi.shape[2] == epochs_data.shape[2])
-
-    # Test init exception
-    assert_raises(ValueError, vector.fit, epochs, y)
-    assert_raises(ValueError, vector.transform, epochs, y)
 
 
 def test_vectorizer():
@@ -198,14 +184,13 @@ def test_unsupervised_spatial_filter():
     """Test unsupervised spatial filter."""
     from sklearn.decomposition import PCA
     from sklearn.kernel_ridge import KernelRidge
-    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
+    raw = io.read_raw_fif(raw_fname)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    preload=True, baseline=None, verbose=False,
-                    add_eeg_ref=False)
+                    preload=True, baseline=None, verbose=False)
 
     # Test estimator
     assert_raises(ValueError, UnsupervisedSpatialFilter, KernelRidge(2))
@@ -257,3 +242,5 @@ def test_temporal_filter():
     filt = TemporalFilter(l_freq=25., h_freq=50., sfreq=1000.,
                           filter_length=150)
     assert_equal(filt.fit_transform(X).shape, X.shape)
+
+run_tests_if_main()

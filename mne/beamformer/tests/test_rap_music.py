@@ -9,6 +9,7 @@ from scipy import linalg
 
 import warnings
 from nose.tools import assert_true
+from numpy.testing import assert_array_equal
 
 import mne
 from mne.datasets import testing
@@ -134,6 +135,9 @@ def test_rap_music_simulated():
     dipoles = rap_music(sim_evoked, forward_fixed, noise_cov,
                         n_dipoles=n_dipoles)
     _check_dipoles(dipoles, forward_fixed, stc, evoked)
+    assert_true(0.98 < dipoles[0].gof.max() < 1.)
+    assert_true(dipoles[0].gof.min() >= 0.)
+    assert_array_equal(dipoles[0].gof, dipoles[1].gof)
 
     dipoles, residual = rap_music(sim_evoked, forward_fixed, noise_cov,
                                   n_dipoles=n_dipoles, return_residual=True)
@@ -148,5 +152,31 @@ def test_rap_music_simulated():
     dipoles, residual = rap_music(sim_evoked, forward_surf_ori, noise_cov,
                                   n_dipoles=n_dipoles, return_residual=True)
     _check_dipoles(dipoles, forward_fixed, stc, evoked, residual)
+
+
+@testing.requires_testing_data
+def test_rap_music_simulated_sphere():
+    """Test RAP-MUSIC with sphere model and MEG only."""
+    noise_cov = mne.read_cov(fname_cov)
+    evoked = mne.read_evokeds(fname_ave, baseline=(None, 0))[0]
+
+    sphere = mne.make_sphere_model(r0=(0., 0., 0.), head_radius=0.070)
+    src = mne.setup_volume_source_space(subject=None, pos=10.,
+                                        sphere=(0.0, 0.0, 0.0, 65.0),
+                                        mindist=5.0, exclude=0.0)
+    forward = mne.make_forward_solution(evoked.info, trans=None, src=src,
+                                        bem=sphere, eeg=False, meg=True)
+
+    evoked.pick_types(meg=True)
+    evoked.crop(0.0, 0.3)
+
+    n_dipoles = 2
+    dipoles = rap_music(evoked, forward, noise_cov, n_dipoles=n_dipoles)
+    # Test that there is one dipole on each hemisphere
+    assert_true(dipoles[0].pos[0, 0] < 0.)
+    assert_true(dipoles[1].pos[0, 0] > 0.)
+    # Check the amplitude scale
+    assert_true(1e-10 < dipoles[0].amplitude[0] < 1e-7)
+
 
 run_tests_if_main()

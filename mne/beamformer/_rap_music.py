@@ -1,6 +1,4 @@
-"""Compute a Recursively Applied and Projected MUltiple
-Signal Classification (RAP-MUSIC).
-"""
+"""Compute a Recursively Applied and Projected MUltiple Signal Classification (RAP-MUSIC)."""  # noqa
 
 # Authors: Yousra Bekhti <yousra.bekhti@gmail.com>
 #          Alexandre Gramfort <alexandre.gramfort@telecom-paristech.fr>
@@ -18,8 +16,8 @@ from ._lcmv import _prepare_beamformer_input, _setup_picks
 
 
 def _apply_rap_music(data, info, times, forward, noise_cov, n_dipoles=2,
-                     picks=None, return_explained_data=False):
-    """RAP-MUSIC for evoked data
+                     picks=None):
+    """RAP-MUSIC for evoked data.
 
     Parameters
     ----------
@@ -38,8 +36,6 @@ def _apply_rap_music(data, info, times, forward, noise_cov, n_dipoles=2,
     picks : array-like of int | None
         Indices (in info) of data channels. If None, MEG and EEG data channels
         (without bad channels) will be used.
-    return_explained_data : bool
-        If True, the explained data is returned as an array.
 
     Returns
     -------
@@ -50,7 +46,6 @@ def _apply_rap_music(data, info, times, forward, noise_cov, n_dipoles=2,
         selected active dipoles and their estimated orientation.
         Computed only if return_explained_data is True.
     """
-
     is_free_ori, ch_names, proj, vertno, G = _prepare_beamformer_input(
         info, forward, label=None, picks=picks, pick_ori=None)
 
@@ -106,13 +101,12 @@ def _apply_rap_music(data, info, times, forward, noise_cov, n_dipoles=2,
 
         A[:, k] = Ak.ravel()
 
-        if return_explained_data:
-            gain_k = gain[:, idx_k]
-            if n_orient == 3:
-                gain_k = np.dot(gain_k,
-                                np.dot(forward['source_nn'][idx_k],
-                                       source_ori))
-            gain_dip[:, k] = gain_k.ravel()
+        gain_k = gain[:, idx_k]
+        if n_orient == 3:
+            gain_k = np.dot(gain_k,
+                            np.dot(forward['source_nn'][idx_k],
+                                   source_ori))
+        gain_dip[:, k] = gain_k.ravel()
 
         oris[k] = source_ori
         poss[k] = source_pos
@@ -127,18 +121,15 @@ def _apply_rap_music(data, info, times, forward, noise_cov, n_dipoles=2,
 
     sol = linalg.lstsq(A, data)[0]
 
-    gof, explained_data = [], None
-    if return_explained_data:
-        explained_data = np.dot(gain_dip, sol)
-        gof = (linalg.norm(np.dot(whitener, explained_data)) /
-               linalg.norm(data))
-
+    explained_data = np.dot(gain_dip, sol)
+    residual = data - np.dot(whitener, explained_data)
+    gof = 1. - np.sum(residual ** 2, axis=0) / np.sum(data ** 2, axis=0)
     return _make_dipoles(times, poss,
                          oris, sol, gof), explained_data
 
 
 def _make_dipoles(times, poss, oris, sol, gof):
-    """Instanciates a list of Dipoles
+    """Instantiate a list of Dipoles.
 
     Parameters
     ----------
@@ -159,33 +150,37 @@ def _make_dipoles(times, poss, oris, sol, gof):
     dipoles : list
         The list of Dipole instances.
     """
-    amplitude = sol * 1e9
     oris = np.array(oris)
 
     dipoles = []
     for i_dip in range(poss.shape[0]):
         i_pos = poss[i_dip][np.newaxis, :].repeat(len(times), axis=0)
         i_ori = oris[i_dip][np.newaxis, :].repeat(len(times), axis=0)
-        dipoles.append(Dipole(times, i_pos, amplitude[i_dip],
-                              i_ori, gof))
+        dipoles.append(Dipole(times, i_pos, sol[i_dip], i_ori, gof))
 
     return dipoles
 
 
 def _compute_subcorr(G, phi_sig):
-    """ Compute the subspace correlation
-    """
+    """Compute the subspace correlation."""
     Ug, Sg, Vg = linalg.svd(G, full_matrices=False)
+    # Now we look at the actual rank of the forward fields
+    # in G and handle the fact that it might be rank defficient
+    # eg. when using MEG and a sphere model for which the
+    # radial component will be truly 0.
+    rank = np.sum(Sg > (Sg[0] * 1e-12))
+    if rank == 0:
+        return 0, np.zeros(len(G))
+    rank = max(rank, 2)  # rank cannot be 1
+    Ug, Sg, Vg = Ug[:, :rank], Sg[:rank], Vg[:rank]
     tmp = np.dot(Ug.T.conjugate(), phi_sig)
-    Uc, Sc, Vc = linalg.svd(tmp, full_matrices=False)
-    X = np.dot(np.dot(Vg.T, np.diag(1. / Sg)), Uc)  # subcorr
-    return Sc[0], X[:, 0] / linalg.norm(X[:, 0])
+    Uc, Sc, _ = linalg.svd(tmp, full_matrices=False)
+    X = np.dot(Vg.T / Sg[None, :], Uc[:, 0])  # subcorr
+    return Sc[0], X / linalg.norm(X)
 
 
 def _compute_proj(A):
-    """ Compute the orthogonal projection operation for
-    a manifold vector A.
-    """
+    """Compute the orthogonal projection operation for a manifold vector A."""
     U, _, _ = linalg.svd(A, full_matrices=False)
     return np.identity(A.shape[0]) - np.dot(U, U.T.conjugate())
 
@@ -197,6 +192,9 @@ def rap_music(evoked, forward, noise_cov, n_dipoles=5, return_residual=False,
 
     Compute Recursively Applied and Projected MUltiple SIgnal Classification
     (RAP-MUSIC) on evoked data.
+
+    .. note:: The goodness of fit (GOF) of all the returned dipoles is the
+              same and corresponds to the GOF of the full set of dipoles.
 
     Parameters
     ----------
@@ -214,7 +212,8 @@ def rap_music(evoked, forward, noise_cov, n_dipoles=5, return_residual=False,
         Indices (in info) of data channels. If None, MEG and EEG data channels
         (without bad channels) will be used.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
 
     Returns
     -------
@@ -244,7 +243,6 @@ def rap_music(evoked, forward, noise_cov, n_dipoles=5, return_residual=False,
 
     .. versionadded:: 0.9.0
     """
-
     info = evoked.info
     data = evoked.data
     times = evoked.times
@@ -255,7 +253,7 @@ def rap_music(evoked, forward, noise_cov, n_dipoles=5, return_residual=False,
 
     dipoles, explained_data = _apply_rap_music(data, info, times, forward,
                                                noise_cov, n_dipoles,
-                                               picks, return_residual)
+                                               picks)
 
     if return_residual:
         residual = evoked.copy()

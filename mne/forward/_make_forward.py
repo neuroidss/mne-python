@@ -16,6 +16,7 @@ from ..transforms import (_ensure_trans, transform_surface_to, apply_trans,
                           _get_trans, _print_coord_trans, _coord_frame_name,
                           Transform)
 from ..utils import logger, verbose, warn
+from ..parallel import check_n_jobs
 from ..source_space import (_ensure_src, _filter_source_spaces,
                             _make_discrete_source_space, SourceSpaces)
 from ..source_estimate import VolSourceEstimate
@@ -23,8 +24,7 @@ from ..surface import _normalize_vectors
 from ..bem import read_bem_solution, _bem_find_surface, ConductorModel
 from ..externals.six import string_types
 
-from .forward import (Forward, write_forward_solution, _merge_meg_eeg_fwds,
-                      convert_forward_solution)
+from .forward import Forward, _merge_meg_eeg_fwds, convert_forward_solution
 from ._compute_forward import _compute_forwards
 
 
@@ -45,8 +45,8 @@ def _read_coil_defs(elekta_defs=False, verbose=None):
         so the first matching coil should be selected for optimal
         integration parameters.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
-        Defaults to raw.verbose.
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
 
     Returns
     -------
@@ -66,7 +66,7 @@ def _read_coil_defs(elekta_defs=False, verbose=None):
 
 
 def _read_coil_def_file(fname):
-    """Helper to read a coil def file"""
+    """Read a coil def file."""
     big_val = 0.5
     coils = list()
     with open(fname, 'r') as fid:
@@ -115,7 +115,7 @@ def _read_coil_def_file(fname):
 
 
 def _create_meg_coil(coilset, ch, acc, do_es):
-    """Create a coil definition using templates, transform if necessary"""
+    """Create a coil definition using templates, transform if necessary."""
     # Also change the coordinate frame if so desired
     if ch['kind'] not in [FIFF.FIFFV_MEG_CH, FIFF.FIFFV_REF_MEG_CH]:
         raise RuntimeError('%s is not a MEG channel' % ch['ch_name'])
@@ -150,12 +150,12 @@ def _create_meg_coil(coilset, ch, acc, do_es):
 
 
 def _create_eeg_el(ch, t=None):
-    """Create an electrode definition, transform coords if necessary"""
+    """Create an electrode definition, transform coords if necessary."""
     if ch['kind'] != FIFF.FIFFV_EEG_CH:
         raise RuntimeError('%s is not an EEG channel. Cannot create an '
                            'electrode definition.' % ch['ch_name'])
     if t is None:
-        t = Transform('head', 'head', np.eye(4))  # identity, no change
+        t = Transform('head', 'head')  # identity, no change
     if t.from_str != 'head':
         raise RuntimeError('Inappropriate coordinate transformation')
 
@@ -178,7 +178,7 @@ def _create_eeg_el(ch, t=None):
 
 
 def _create_meg_coils(chs, acc, t=None, coilset=None, do_es=False):
-    """Create a set of MEG coils in the head coordinate frame"""
+    """Create a set of MEG coils in the head coordinate frame."""
     acc = _accuracy_dict[acc] if isinstance(acc, string_types) else acc
     coilset = _read_coil_defs(verbose=False) if coilset is None else coilset
     coils = [_create_meg_coil(coilset, ch, acc, do_es) for ch in chs]
@@ -187,7 +187,7 @@ def _create_meg_coils(chs, acc, t=None, coilset=None, do_es=False):
 
 
 def _transform_orig_meg_coils(coils, t, do_es=True):
-    """Helper to transform original (device) MEG coil positions"""
+    """Transform original (device) MEG coil positions."""
     if t is None:
         return
     for coil in coils:
@@ -204,13 +204,13 @@ def _transform_orig_meg_coils(coils, t, do_es=True):
 
 
 def _create_eeg_els(chs):
-    """Create a set of EEG electrodes in the head coordinate frame"""
+    """Create a set of EEG electrodes in the head coordinate frame."""
     return [_create_eeg_el(ch) for ch in chs]
 
 
 @verbose
 def _setup_bem(bem, bem_extra, neeg, mri_head_t, verbose=None):
-    """Set up a BEM for forward computation"""
+    """Set up a BEM for forward computation."""
     logger.info('')
     if isinstance(bem, string_types):
         logger.info('Setting up the BEM model using %s...\n' % bem_extra)
@@ -241,7 +241,7 @@ def _setup_bem(bem, bem_extra, neeg, mri_head_t, verbose=None):
 def _prep_meg_channels(info, accurate=True, exclude=(), ignore_ref=False,
                        elekta_defs=False, head_frame=True, do_es=False,
                        verbose=None):
-    """Prepare MEG coil definitions for forward calculation
+    """Prepare MEG coil definitions for forward calculation.
 
     Parameters
     ----------
@@ -263,8 +263,8 @@ def _prep_meg_channels(info, accurate=True, exclude=(), ignore_ref=False,
     do_es : bool
         If True, compute and store ex, ey, ez, and r0_exey.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
-        Defaults to raw.verbose.
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
 
     Returns
     -------
@@ -277,7 +277,6 @@ def _prep_meg_channels(info, accurate=True, exclude=(), ignore_ref=False,
     meginfo : instance of Info
         Information subselected for just the set of MEG coils
     """
-
     accuracy = 'accurate' if accurate else 'normal'
     info_extra = 'info'
     meg_info = None
@@ -352,7 +351,7 @@ def _prep_meg_channels(info, accurate=True, exclude=(), ignore_ref=False,
 
 @verbose
 def _prep_eeg_channels(info, exclude=(), verbose=None):
-    """Prepare EEG electrode definitions for forward calculation
+    """Prepare EEG electrode definitions for forward calculation.
 
     Parameters
     ----------
@@ -362,8 +361,8 @@ def _prep_eeg_channels(info, exclude=(), verbose=None):
         List of channels to exclude. If 'bads', exclude channels in
         info['bads']
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
-        Defaults to raw.verbose.
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
 
     Returns
     -------
@@ -399,10 +398,8 @@ def _prep_eeg_channels(info, exclude=(), verbose=None):
 @verbose
 def _prepare_for_forward(src, mri_head_t, info, bem, mindist, n_jobs,
                          bem_extra='', trans='', info_extra='',
-                         meg=True, eeg=True, ignore_ref=False, fname=None,
-                         overwrite=False, verbose=None):
-    """Helper to prepare for forward computation"""
-
+                         meg=True, eeg=True, ignore_ref=False, verbose=None):
+    """Prepare for forward computation."""
     # Read the source locations
     logger.info('')
     # let's make a copy in case we modify something
@@ -423,8 +420,8 @@ def _prepare_for_forward(src, mri_head_t, info, bem, mindist, n_jobs,
     _print_coord_trans(mri_head_t)
 
     # make a new dict with the relevant information
-    arg_list = [info_extra, trans, src, bem_extra, fname, meg, eeg,
-                mindist, overwrite, n_jobs, verbose]
+    arg_list = [info_extra, trans, src, bem_extra, meg, eeg, mindist,
+                n_jobs, verbose]
     cmd = 'make_forward_solution(%s)' % (', '.join([str(a) for a in arg_list]))
     mri_id = dict(machid=np.zeros(2, np.int32), version=0, secs=0, usecs=0)
     info = Info(chs=info['chs'], comps=info['comps'],
@@ -484,10 +481,10 @@ def _prepare_for_forward(src, mri_head_t, info, bem, mindist, n_jobs,
 
 
 @verbose
-def make_forward_solution(info, trans, src, bem, fname=None, meg=True,
-                          eeg=True, mindist=0.0, ignore_ref=False,
-                          overwrite=False, n_jobs=1, verbose=None):
-    """Calculate a forward solution for a subject
+def make_forward_solution(info, trans, src, bem, meg=True, eeg=True,
+                          mindist=0.0, ignore_ref=False, n_jobs=1,
+                          verbose=None):
+    """Calculate a forward solution for a subject.
 
     Parameters
     ----------
@@ -508,9 +505,6 @@ def make_forward_solution(info, trans, src, bem, fname=None, meg=True,
     bem : dict | str
         Filename of the BEM (e.g., "sample-5120-5120-5120-bem-sol.fif") to
         use, or a loaded sphere model (dict).
-    fname : str | None
-        Destination forward solution filename. If None, the solution
-        will not be saved.
     meg : bool
         If True (Default), include MEG computations.
     eeg : bool
@@ -521,25 +515,28 @@ def make_forward_solution(info, trans, src, bem, fname=None, meg=True,
         If True, do not include reference channels in compensation. This
         option should be True for KIT files, since forward computation
         with reference channels is not currently supported.
-    overwrite : bool
-        If True, the destination file (if it exists) will be overwritten.
-        If False (default), an error will be raised if the file exists.
     n_jobs : int
         Number of jobs to run in parallel.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
 
     Returns
     -------
     fwd : instance of Forward
         The forward solution.
 
+    See Also
+    --------
+    convert_forward_solution
+
     Notes
     -----
-    Some of the forward solution calculation options from the C code
-    (e.g., `--grad`, `--fixed`) are not implemented here. For those,
-    consider using the C command line tools, or request that they
-    be added to the MNE-Python.
+    The ``--grad`` option from MNE-C (to compute gradients) is not implemented
+    here.
+
+    To create a fixed-orientation forward solution, use this function
+    followed by :func:`mne.convert_forward_solution`.
     """
     # Currently not (sup)ported:
     # 1. --grad option (gradients of the field, not used much)
@@ -550,9 +547,6 @@ def make_forward_solution(info, trans, src, bem, fname=None, meg=True,
     # (could also be HEAD to MRI)
     mri_head_t, trans = _get_trans(trans)
     bem_extra = 'dict' if isinstance(bem, dict) else bem
-    if fname is not None and op.isfile(fname) and not overwrite:
-        raise IOError('file "%s" exists, consider using overwrite=True'
-                      % fname)
     if not isinstance(info, (Info, string_types)):
         raise TypeError('info should be an instance of Info or string')
     if isinstance(info, string_types):
@@ -560,6 +554,7 @@ def make_forward_solution(info, trans, src, bem, fname=None, meg=True,
         info = read_info(info, verbose=False)
     else:
         info_extra = 'instance of Info'
+    n_jobs = check_n_jobs(n_jobs)
 
     # Report the setup
     logger.info('Source space                 : %s' % src)
@@ -575,12 +570,11 @@ def make_forward_solution(info, trans, src, bem, fname=None, meg=True,
     logger.info('Do computations in %s coordinates',
                 _coord_frame_name(FIFF.FIFFV_COORD_HEAD))
     logger.info('Free source orientations')
-    logger.info('Destination for the solution : %s' % fname)
 
     megcoils, meg_info, compcoils, megnames, eegels, eegnames, rr, info, \
         update_kwargs, bem = _prepare_for_forward(
             src, mri_head_t, info, bem, mindist, n_jobs, bem_extra, trans,
-            info_extra, meg, eeg, ignore_ref, fname, overwrite)
+            info_extra, meg, eeg, ignore_ref)
     del (src, mri_head_t, trans, info_extra, bem_extra, mindist,
          meg, eeg, ignore_ref)
 
@@ -602,27 +596,23 @@ def make_forward_solution(info, trans, src, bem, fname=None, meg=True,
     # done in the C code) because mne-python assumes forward solution source
     # spaces are in head coords.
     fwd.update(**update_kwargs)
-    if fname is not None:
-        logger.info('writing %s...', fname)
-        write_forward_solution(fname, fwd, overwrite, verbose=False)
-
     logger.info('Finished.')
     return fwd
 
 
 def make_forward_dipole(dipole, bem, info, trans=None, n_jobs=1, verbose=None):
-    """Convert dipole object to source estimate and calculate forward operator
+    """Convert dipole object to source estimate and calculate forward operator.
 
     The instance of Dipole is converted to a discrete source space,
     which is then combined with a BEM or a sphere model and
     the sensor information in info to form a forward operator.
 
     The source estimate object (with the forward operator) can be projected to
-    sensor-space using :func:`mne.simulation.evoked.simulate_evoked`.
+    sensor-space using :func:`mne.simulation.simulate_evoked`.
 
-    Note that if the (unique) time points of the dipole object are unevenly
-    spaced, the first output will be a list of single-timepoint source
-    estimates.
+    .. note:: If the (unique) time points of the dipole object are unevenly
+              spaced, the first output will be a list of single-timepoint
+              source estimates.
 
     Parameters
     ----------
@@ -641,7 +631,8 @@ def make_forward_dipole(dipole, bem, info, trans=None, n_jobs=1, verbose=None):
     n_jobs : int
         Number of jobs to run in parallel (used in making forward solution).
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
 
     Returns
     -------
@@ -675,8 +666,8 @@ def make_forward_dipole(dipole, bem, info, trans=None, n_jobs=1, verbose=None):
 
     # Forward operator created for channels in info (use pick_info to restrict)
     # Use defaults for most params, including min_dist
-    fwd = make_forward_solution(info, trans, src, bem, fname=None,
-                                n_jobs=n_jobs, verbose=verbose)
+    fwd = make_forward_solution(info, trans, src, bem, n_jobs=n_jobs,
+                                verbose=verbose)
     # Convert from free orientations to fixed (in-place)
     convert_forward_solution(fwd, surf_ori=False, force_fixed=True,
                              copy=False, verbose=None)
@@ -737,7 +728,7 @@ def make_forward_dipole(dipole, bem, info, trans=None, n_jobs=1, verbose=None):
 def _to_forward_dict(fwd, names, fwd_grad=None,
                      coord_frame=FIFF.FIFFV_COORD_HEAD,
                      source_ori=FIFF.FIFFV_MNE_FREE_ORI):
-    """Convert forward solution matrices to dicts"""
+    """Convert forward solution matrices to dicts."""
     assert names is not None
     if len(fwd) == 0:
         return None

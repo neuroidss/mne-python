@@ -94,12 +94,11 @@ mne.viz.plot_trans(info, trans, subject=subject, dig=True,
 # and spacing parameter.
 
 src = mne.setup_source_space(subject, spacing='oct6',
-                             subjects_dir=subjects_dir,
-                             add_dist=False, overwrite=True)
+                             subjects_dir=subjects_dir, add_dist=False)
 print(src)
 
 ###############################################################################
-# src contains two parts, one for the left hemisphere (4098 locations) and
+# ``src`` contains two parts, one for the left hemisphere (4098 locations) and
 # one for the right hemisphere (4098 locations). Sources can be visualized on
 # top of the BEM surfaces.
 
@@ -154,8 +153,7 @@ bem = mne.make_bem_solution(model)
 # See :func:`mne.make_forward_solution` for details on parameters meaning.
 
 fwd = mne.make_forward_solution(raw_fname, trans=trans, src=src, bem=bem,
-                                fname=None, meg=True, eeg=False,
-                                mindist=5.0, n_jobs=2)
+                                meg=True, eeg=False, mindist=5.0, n_jobs=2)
 print(fwd)
 
 ###############################################################################
@@ -166,16 +164,39 @@ leadfield = fwd['sol']['data']
 print("Leadfield size : %d sensors x %d dipoles" % leadfield.shape)
 
 ###############################################################################
+# To extract the numpy array containing the forward operator corresponding to
+# the source space `fwd['src']` with cortical orientation constraint
+# we can use the following:
+
+fwd_fixed = mne.convert_forward_solution(fwd, surf_ori=True,
+                                         force_fixed=True)
+leadfield = fwd_fixed['sol']['data']
+print("Leadfield size : %d sensors x %d dipoles" % leadfield.shape)
+
+###############################################################################
+# This is equivalent to the following code that explicitly applies the
+# forward operator to a source estimate composed of the identity operator:
+n_dipoles = leadfield.shape[1]
+vertices = [src_hemi['vertno'] for src_hemi in fwd_fixed['src']]
+stc = mne.SourceEstimate(1e-9 * np.eye(n_dipoles), vertices, tmin=0., tstep=1)
+leadfield = mne.apply_forward(fwd_fixed, stc, info).data / 1e-9
+
+###############################################################################
 # To save to disk a forward solution you can use
 # :func:`mne.write_forward_solution` and to read it back from disk
 # :func:`mne.read_forward_solution`. Don't forget that FIF files containing
 # forward solution should end with *-fwd.fif*.
+#
+# To get a fixed-orientation forward solution, use
+# :func:`mne.convert_forward_solution` to convert the free-orientation
+# solution to (surface-oriented) fixed orientation.
 
 ###############################################################################
 # Exercise
 # --------
 #
-# By looking at :ref:`sphx_glr_auto_examples_forward_plot_read_forward.py`
+# By looking at
+# :ref:`sphx_glr_auto_examples_forward_plot_forward_sensitivity_maps.py`
 # plot the sensitivity maps for EEG and compare it with the MEG, can you
 # justify the claims that:
 #

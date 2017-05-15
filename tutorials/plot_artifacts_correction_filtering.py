@@ -4,7 +4,7 @@
 Filtering and resampling data
 =============================
 
-Certain artifacts are restricted to certain frequencies and can therefore
+Some artifacts are restricted to certain frequencies and can therefore
 be fixed by filtering. An artifact that typically affects only some
 frequencies is due to the power line.
 
@@ -31,7 +31,7 @@ tmin, tmax = 0, 20  # use the first 20s of data
 
 # Setup for reading the raw data (save memory by cropping the raw data
 # before loading it)
-raw = mne.io.read_raw_fif(raw_fname, add_eeg_ref=False)
+raw = mne.io.read_raw_fif(raw_fname)
 raw.crop(tmin, tmax).load_data()
 raw.info['bads'] = ['MEG 2443', 'EEG 053']  # bads + 2 more
 
@@ -44,7 +44,7 @@ picks = mne.pick_types(raw.info, meg='mag', eeg=False, eog=False,
                        stim=False, exclude='bads', selection=selection)
 
 # Let's first check out all channel types
-raw.plot_psd(area_mode='range', tmax=10.0, picks=picks)
+raw.plot_psd(area_mode='range', tmax=10.0, picks=picks, average=False)
 
 ###############################################################################
 # Removing power-line noise with notch filtering
@@ -55,7 +55,7 @@ raw.plot_psd(area_mode='range', tmax=10.0, picks=picks)
 
 raw.notch_filter(np.arange(60, 241, 60), picks=picks, filter_length='auto',
                  phase='zero')
-raw.plot_psd(area_mode='range', tmax=10.0, picks=picks)
+raw.plot_psd(area_mode='range', tmax=10.0, picks=picks, average=False)
 
 ###############################################################################
 # Removing power-line noise with low-pass filtering
@@ -65,9 +65,8 @@ raw.plot_psd(area_mode='range', tmax=10.0, picks=picks)
 # noise you can simply low pass filter the data.
 
 # low pass filtering below 50 Hz
-raw.filter(None, 50., h_trans_bandwidth='auto', filter_length='auto',
-           phase='zero')
-raw.plot_psd(area_mode='range', tmax=10.0, picks=picks)
+raw.filter(None, 50., fir_design='firwin')
+raw.plot_psd(area_mode='range', tmax=10.0, picks=picks, average=False)
 
 ###############################################################################
 # High-pass filtering to remove slow drifts
@@ -79,9 +78,8 @@ raw.plot_psd(area_mode='range', tmax=10.0, picks=picks)
 #              (see examples in :ref:`tut_filtering_hp_problems`),
 #              so apply high-pass filters with caution.
 
-raw.filter(1., None, l_trans_bandwidth='auto', filter_length='auto',
-           phase='zero')
-raw.plot_psd(area_mode='range', tmax=10.0, picks=picks)
+raw.filter(1., None, fir_design='firwin')
+raw.plot_psd(area_mode='range', tmax=10.0, picks=picks, average=False)
 
 
 ###############################################################################
@@ -89,8 +87,7 @@ raw.plot_psd(area_mode='range', tmax=10.0, picks=picks)
 # a so-called *band-pass* filter by running the following:
 
 # band-pass filtering in the range 1 Hz - 50 Hz
-raw.filter(1, 50., l_trans_bandwidth='auto', h_trans_bandwidth='auto',
-           filter_length='auto', phase='zero')
+raw.filter(1, 50., fir_design='firwin')
 
 ###############################################################################
 # Downsampling and decimation

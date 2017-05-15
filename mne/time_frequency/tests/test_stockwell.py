@@ -15,11 +15,39 @@ from scipy import fftpack
 from mne import read_events, Epochs
 from mne.io import read_raw_fif
 from mne.time_frequency._stockwell import (tfr_stockwell, _st,
-                                           _precompute_st_windows)
+                                           _precompute_st_windows,
+                                           _check_input_st,
+                                           _st_power_itc)
+
 from mne.time_frequency.tfr import AverageTFR
+from mne.utils import run_tests_if_main
 
 base_dir = op.join(op.dirname(__file__), '..', '..', 'io', 'tests', 'data')
 raw_fname = op.join(base_dir, 'test_raw.fif')
+
+
+def test_stockwell_check_input():
+    """Test input checker for stockwell"""
+    # check for data size equal and unequal to a power of 2
+
+    for last_dim in (127, 128):
+        data = np.zeros((2, 10, last_dim))
+        x_in, n_fft, zero_pad = _check_input_st(data, None)
+
+        assert_equal(x_in.shape, (2, 10, 128))
+        assert_equal(n_fft, 128)
+        assert_equal(zero_pad, 128 - last_dim)
+
+
+def test_stockwell_st_no_zero_pad():
+    """Test stockwell power itc"""
+    data = np.zeros((20, 128))
+    start_f = 1
+    stop_f = 10
+    sfreq = 30
+    width = 2
+    W = _precompute_st_windows(data.shape[-1], start_f, stop_f, sfreq, width)
+    _st_power_itc(data, 10, True, 0, 1, W)
 
 
 def test_stockwell_core():
@@ -65,13 +93,12 @@ def test_stockwell_core():
 
 def test_stockwell_api():
     """Test stockwell functions."""
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname)
     event_id, tmin, tmax = 1, -0.2, 0.5
     event_name = op.join(base_dir, 'test-eve.fif')
     events = read_events(event_name)
     epochs = Epochs(raw, events,  # XXX pick 2 has epochs of zeros.
-                    event_id, tmin, tmax, picks=[0, 1, 3], baseline=(None, 0),
-                    add_eeg_ref=False)
+                    event_id, tmin, tmax, picks=[0, 1, 3])
     for fmin, fmax in [(None, 50), (5, 50), (5, None)]:
         with warnings.catch_warnings(record=True):  # zero papdding
             power, itc = tfr_stockwell(epochs, fmin=fmin, fmax=fmax,
@@ -92,3 +119,5 @@ def test_stockwell_api():
     assert_true(itc.data.max() <= 1.0)
     assert_true(np.log(power.data.max()) * 20 <= 0.0)
     assert_true(np.log(power.data.max()) * 20 <= 0.0)
+
+run_tests_if_main()

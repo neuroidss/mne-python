@@ -5,22 +5,26 @@ from __future__ import print_function
 #
 # License: BSD (3-clause)
 
-import os.path as op
 import inspect
+import os.path as op
+import warnings
+
 import numpy as np
 from numpy.testing import assert_array_almost_equal, assert_array_equal
-from nose.tools import assert_equal, assert_raises, assert_true
+from nose.tools import (assert_equal, assert_almost_equal, assert_raises,
+                        assert_true)
 from scipy import linalg
 import scipy.io
 
 from mne import pick_types, Epochs, find_events, read_events
 from mne.transforms import apply_trans
 from mne.tests.common import assert_dig_allclose
-from mne.utils import run_tests_if_main
+from mne.utils import run_tests_if_main, _TempDir
 from mne.io import read_raw_fif, read_raw_kit, read_epochs_kit
 from mne.io.kit.coreg import read_sns
 from mne.io.kit.constants import KIT, KIT_CONSTANTS, KIT_NY, KIT_UMD_2014
 from mne.io.tests.test_raw import _test_raw_reader
+from mne.surface import _get_ico_surface
 
 FILE = inspect.getfile(inspect.currentframe())
 parent_dir = op.dirname(op.abspath(FILE))
@@ -71,7 +75,7 @@ def test_data():
     # Binary file only stores the sensor channels
     py_picks = pick_types(raw_py.info, exclude='bads')
     raw_bin = op.join(data_dir, 'test_bin_raw.fif')
-    raw_bin = read_raw_fif(raw_bin, preload=True, add_eeg_ref=False)
+    raw_bin = read_raw_fif(raw_bin, preload=True)
     bin_picks = pick_types(raw_bin.info, stim=True, exclude='bads')
     data_bin, _ = raw_bin[bin_picks]
     data_py, _ = raw_py[py_picks]
@@ -99,8 +103,7 @@ def test_epochs():
     """Test reading epoched SQD file."""
     raw = read_raw_kit(sqd_path, stim=None)
     events = read_events(events_path)
-    raw_epochs = Epochs(raw, events, None, tmin=0, tmax=.099, baseline=None,
-                        add_eeg_ref=False)
+    raw_epochs = Epochs(raw, events, None, tmin=0, tmax=.099, baseline=None)
     data1 = raw_epochs.get_data()
     epochs = read_epochs_kit(epochs_path, events_path)
     data11 = epochs.get_data()
@@ -131,13 +134,17 @@ def test_raw_events():
     assert_array_equal(find_events(raw, output='step', consecutive=True),
                        evts(0, 160, 0, 160, 0))
 
+    raw = read_raw_kit(sqd_path, stim=range(160, 162), slope='+',
+                       stim_code='channel')
+    assert_array_equal(find_events(raw, output='step', consecutive=True),
+                       evts(0, 160, 0, 160, 0))
+
 
 def test_ch_loc():
     """Test raw kit loc."""
     raw_py = read_raw_kit(sqd_path, mrk_path, elp_txt_path, hsp_txt_path,
                           stim='<')
-    raw_bin = read_raw_fif(op.join(data_dir, 'test_bin_raw.fif'),
-                           add_eeg_ref=False)
+    raw_bin = read_raw_fif(op.join(data_dir, 'test_bin_raw.fif'))
 
     ch_py = raw_py._raw_extras[0]['sensor_locs'][:, :5]
     # ch locs stored as m, not mm
@@ -181,5 +188,35 @@ def test_hsp_elp():
     pts_elp_in_dev = apply_trans(linalg.inv(trans_elp), pts_elp)
     assert_array_almost_equal(pts_elp_in_dev, pts_txt_in_dev, decimal=5)
 
+
+def test_decimate():
+    """Test decimation of digitizer headshapes with too many points."""
+    # load headshape and convert to meters
+    hsp_mm = _get_ico_surface(5)['rr'] * 100
+    hsp_m = hsp_mm / 1000.
+
+    # save headshape to a file in mm in temporary directory
+    tempdir = _TempDir()
+    sphere_hsp_path = op.join(tempdir, 'test_sphere.txt')
+    np.savetxt(sphere_hsp_path, hsp_mm)
+
+    # read in raw data using spherical hsp, and extract new hsp
+    with warnings.catch_warnings(record=True) as w:
+        raw = read_raw_kit(sqd_path, mrk_path, elp_txt_path, sphere_hsp_path)
+    assert_true(any('more than' in str(ww.message) for ww in w))
+    # collect headshape from raw (should now be in m)
+    hsp_dec = np.array([dig['r'] for dig in raw.info['dig']])[8:]
+
+    # with 10242 points and _decimate_points set to resolution of 5 mm, hsp_dec
+    # should be a bit over 5000 points. If not, something is wrong or
+    # decimation resolution has been purposefully changed
+    assert_true(len(hsp_dec) > 5000)
+
+    # should have similar size, distance from center
+    dist = np.sqrt(np.sum((hsp_m - np.mean(hsp_m, axis=0))**2, axis=1))
+    dist_dec = np.sqrt(np.sum((hsp_dec - np.mean(hsp_dec, axis=0))**2, axis=1))
+    hsp_rad = np.mean(dist)
+    hsp_dec_rad = np.mean(dist_dec)
+    assert_almost_equal(hsp_rad, hsp_dec_rad, places=3)
 
 run_tests_if_main()

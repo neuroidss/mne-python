@@ -10,7 +10,7 @@ import numpy as np
 from numpy.testing import assert_array_almost_equal, assert_allclose
 from nose.tools import assert_equal, assert_raises, assert_true
 
-from mne import find_events, Epochs, pick_types
+from mne import find_events, Epochs, pick_types, channels
 from mne.io import read_raw_fif
 from mne.io.array import RawArray
 from mne.io.tests.test_raw import _test_raw_reader
@@ -28,19 +28,19 @@ fif_fname = op.join(base_dir, 'test_raw.fif')
 @slow_test
 @requires_version('scipy', '0.12')
 def test_array_raw():
-    """Test creating raw from array
-    """
+    """Test creating raw from array."""
     import matplotlib.pyplot as plt
     # creating
-    raw = read_raw_fif(fif_fname, add_eeg_ref=False).crop(2, 5)
+    raw = read_raw_fif(fif_fname).crop(2, 5)
     data, times = raw[:, :]
     sfreq = raw.info['sfreq']
     ch_names = [(ch[4:] if 'STI' not in ch else ch)
                 for ch in raw.info['ch_names']]  # change them, why not
     # del raw
     types = list()
-    for ci in range(102):
+    for ci in range(101):
         types.extend(('grad', 'grad', 'mag'))
+    types.extend(['ecog', 'seeg', 'hbo'])  # really 3 meg channels
     types.extend(['stim'] * 9)
     types.extend(['eeg'] * 60)
     # wrong length
@@ -66,21 +66,16 @@ def test_array_raw():
     picks = pick_types(raw2.info, misc=True, exclude='bads')[:4]
     assert_equal(len(picks), 4)
     raw_lp = raw2.copy()
-    raw_lp.filter(None, 4.0, h_trans_bandwidth=4.,
-                  filter_length='auto', picks=picks, n_jobs=2, phase='zero',
-                  fir_window='hamming')
+    kwargs = dict(fir_design='firwin', picks=picks)
+    raw_lp.filter(None, 4.0, h_trans_bandwidth=4., n_jobs=2, **kwargs)
     raw_hp = raw2.copy()
-    raw_hp.filter(16.0, None, l_trans_bandwidth=4.,
-                  filter_length='auto', picks=picks, n_jobs=2, phase='zero',
-                  fir_window='hamming')
+    raw_hp.filter(16.0, None, l_trans_bandwidth=4., n_jobs=2, **kwargs)
     raw_bp = raw2.copy()
-    raw_bp.filter(8.0, 12.0, l_trans_bandwidth=4.,
-                  h_trans_bandwidth=4., filter_length='auto', picks=picks,
-                  phase='zero', fir_window='hamming')
+    raw_bp.filter(8.0, 12.0, l_trans_bandwidth=4., h_trans_bandwidth=4.,
+                  **kwargs)
     raw_bs = raw2.copy()
     raw_bs.filter(16.0, 4.0, l_trans_bandwidth=4., h_trans_bandwidth=4.,
-                  filter_length='auto', picks=picks, n_jobs=2, phase='zero',
-                  fir_window='hamming')
+                  n_jobs=2, **kwargs)
     data, _ = raw2[picks, :]
     lp_data, _ = raw_lp[picks, :]
     hp_data, _ = raw_hp[picks, :]
@@ -92,15 +87,14 @@ def test_array_raw():
 
     # plotting
     raw2.plot()
-    raw2.plot_psd()
+    raw2.plot_psd(tmax=np.inf, average=True, n_fft=1024, spatial_colors=False)
     plt.close('all')
 
     # epoching
     events = find_events(raw2, stim_channel='STI 014')
     events[:, 2] = 1
     assert_true(len(events) > 2)
-    epochs = Epochs(raw2, events, 1, -0.2, 0.4, preload=True,
-                    add_eeg_ref=False)
+    epochs = Epochs(raw2, events, 1, -0.2, 0.4, preload=True)
     epochs.plot_drop_log()
     epochs.plot()
     evoked = epochs.average()
@@ -113,5 +107,21 @@ def test_array_raw():
     data = rng.randn(1, 100) + 1j * rng.randn(1, 100)
     raw = RawArray(data, create_info(1, 1000., 'eeg'))
     assert_allclose(raw._data, data)
+
+    # Using digital montage to give MNI electrode coordinates
+    n_elec = 10
+    ts_size = 10000
+    Fs = 512.
+    elec_labels = [str(i) for i in range(n_elec)]
+    elec_coords = np.random.randint(60, size=(n_elec, 3)).tolist()
+
+    electrode = np.random.rand(n_elec, ts_size)
+    dig_ch_pos = dict(zip(elec_labels, elec_coords))
+    mon = channels.DigMontage(dig_ch_pos=dig_ch_pos)
+    info = create_info(elec_labels, Fs, 'ecog', montage=mon)
+
+    raw = RawArray(electrode, info)
+    raw.plot_psd(average=False)  # looking for inexistent layout
+    raw.plot_psd_topo()
 
 run_tests_if_main()

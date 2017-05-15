@@ -19,6 +19,7 @@ from mne import read_source_estimate
 from mne.datasets import testing
 from mne.stats.regression import linear_regression, linear_regression_raw
 from mne.io import RawArray
+from mne.utils import requires_sklearn
 
 warnings.simplefilter('always')
 
@@ -36,10 +37,10 @@ def test_regression():
     event_id = dict(aud_l=1, aud_r=2)
 
     # Setup for reading the raw data
-    raw = mne.io.read_raw_fif(raw_fname, add_eeg_ref=False)
+    raw = mne.io.read_raw_fif(raw_fname)
     events = mne.read_events(event_fname)[:10]
     epochs = mne.Epochs(raw, events, event_id, tmin, tmax, proj=True,
-                        baseline=(None, 0), add_eeg_ref=False)
+                        baseline=(None, 0))
     picks = np.arange(len(epochs.ch_names))
     evoked = epochs.average(picks=picks)
     design_matrix = epochs.events[:, 1:].astype(np.float64)
@@ -89,7 +90,7 @@ def test_continuous_regression_no_overlap():
     """Test regression without overlap correction, on real data."""
     tmin, tmax = -.1, .5
 
-    raw = mne.io.read_raw_fif(raw_fname, preload=True, add_eeg_ref=False)
+    raw = mne.io.read_raw_fif(raw_fname, preload=True)
     raw.apply_proj()
     events = mne.read_events(event_fname)
     event_id = dict(audio_l=1, audio_r=2)
@@ -97,7 +98,7 @@ def test_continuous_regression_no_overlap():
     raw = raw.pick_channels(raw.ch_names[:2])
 
     epochs = mne.Epochs(raw, events, event_id, tmin, tmax,
-                        baseline=None, reject=None, add_eeg_ref=False)
+                        baseline=None, reject=None)
 
     revokeds = linear_regression_raw(raw, events, event_id,
                                      tmin=tmin, tmax=tmax,
@@ -120,6 +121,8 @@ def test_continuous_regression_no_overlap():
                   events, event_id, tmin, tmax, decim=2)
 
 
+@requires_sklearn
+@testing.requires_testing_data
 def test_continuous_regression_with_overlap():
     """Test regression with overlap correction."""
     signal = np.zeros(100000)
@@ -132,6 +135,20 @@ def test_continuous_regression_with_overlap():
     signal = np.convolve(signal, effect)[:len(signal)]
     raw = RawArray(signal[np.newaxis, :], mne.create_info(1, 100, 'eeg'))
 
-    assert_allclose(effect,
-                    linear_regression_raw(raw, events, {1: 1}, tmin=0)[1]
-                    .data.flatten())
+    assert_allclose(effect, linear_regression_raw(
+        raw, events, {1: 1}, tmin=0)[1].data.flatten())
+
+    # test that sklearn solvers can be used
+    from sklearn.linear_model.ridge import ridge_regression
+
+    def solver(X, y):
+        return ridge_regression(X, y, alpha=0.)
+    assert_allclose(effect, linear_regression_raw(
+        raw, events, tmin=0, solver=solver)['1'].data.flatten())
+
+    # test bad solvers
+    def solT(X, y):
+        return ridge_regression(X, y, alpha=0.).T
+    assert_raises(ValueError, linear_regression_raw, raw, events, solver=solT)
+    assert_raises(ValueError, linear_regression_raw, raw, events, solver='err')
+    assert_raises(TypeError, linear_regression_raw, raw, events, solver=0)

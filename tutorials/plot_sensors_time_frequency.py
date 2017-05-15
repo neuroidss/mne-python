@@ -1,5 +1,4 @@
 """
-
 .. _tut_sensors_time_frequency:
 
 =============================================
@@ -27,7 +26,7 @@ data_path = somato.data_path()
 raw_fname = data_path + '/MEG/somato/sef_raw_sss.fif'
 
 # Setup for reading the raw data
-raw = mne.io.read_raw_fif(raw_fname, add_eeg_ref=False)
+raw = mne.io.read_raw_fif(raw_fname)
 events = mne.find_events(raw, stim_channel='STI 014')
 
 # picks MEG gradiometers
@@ -38,7 +37,7 @@ event_id, tmin, tmax = 1, -1., 3.
 baseline = (None, 0)
 epochs = mne.Epochs(raw, events, event_id, tmin, tmax, picks=picks,
                     baseline=baseline, reject=dict(grad=4000e-13, eog=350e-6),
-                    preload=True, add_eeg_ref=False)
+                    preload=True)
 
 epochs.resample(150., npad='auto')  # resample to reduce computation time
 
@@ -87,7 +86,8 @@ plt.show()
 # but you can also use :func:`mne.time_frequency.tfr_multitaper`
 # or :func:`mne.time_frequency.tfr_stockwell`.
 
-freqs = np.arange(6, 30, 3)  # define frequencies of interest
+# define frequencies of interest (log-spaced)
+freqs = np.logspace(*np.log10([6, 35]), num=8)
 n_cycles = freqs / 2.  # different number of cycle per frequency
 power, itc = tfr_morlet(epochs, freqs=freqs, n_cycles=n_cycles, use_fft=True,
                         return_itc=True, decim=3, n_jobs=1)
@@ -102,7 +102,7 @@ power, itc = tfr_morlet(epochs, freqs=freqs, n_cycles=n_cycles, use_fft=True,
 #     You can also select a portion in the time-frequency plane to
 #     obtain a topomap for a certain time-frequency region.
 power.plot_topo(baseline=(-0.5, 0), mode='logratio', title='Average power')
-power.plot([82], baseline=(-0.5, 0), mode='logratio')
+power.plot([82], baseline=(-0.5, 0), mode='logratio', title=power.ch_names[82])
 
 fig, axis = plt.subplots(1, 2, figsize=(7, 4))
 power.plot_topomap(ch_type='grad', tmin=0.5, tmax=1.5, fmin=8, fmax=12,

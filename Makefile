@@ -100,10 +100,21 @@ flake:
 	@echo "flake8 passed"
 
 codespell:  # running manually
-	@codespell.py -w -i 3 -q 3 -S $(CODESPELL_SKIPS) -D ./dictionary.txt $(CODESPELL_DIRS)
+	@codespell -w -i 3 -q 3 -S $(CODESPELL_SKIPS) -D ./dictionary.txt $(CODESPELL_DIRS)
 
 codespell-error:  # running on travis
-	@codespell.py -i 0 -q 7 -S $(CODESPELL_SKIPS) -D ./dictionary.txt $(CODESPELL_DIRS)
+	@codespell -i 0 -q 7 -S $(CODESPELL_SKIPS) -D ./dictionary.txt $(CODESPELL_DIRS)
+
+pydocstyle:
+	@echo "Running pydocstyle"
+	@pydocstyle
+
+docstring:
+	@echo "Running docstring tests"
+	@$(NOSETESTS) mne/tests/test_docstring_parameters.py
+
+pep:
+	@$(MAKE) -k flake pydocstyle docstring codespell-error
 
 manpages:
 	@echo "I: generating manpages"
@@ -122,3 +133,6 @@ build-doc-dev:
 build-doc-stable:
 	cd doc; make clean
 	cd doc; DISPLAY=:1.0 xvfb-run -n 1 -s "-screen 0 1280x1024x24 -noreset -ac +extension GLX +render" make html_stable
+
+docstyle:
+	@pydocstyle

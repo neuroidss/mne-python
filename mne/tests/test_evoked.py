@@ -55,13 +55,12 @@ def test_decim():
     assert_array_equal(data_epochs, data_epochs_3)
 
     # Now let's do it with some real data
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname)
     events = read_events(event_name)
     sfreq_new = raw.info['sfreq'] / decim
     raw.info['lowpass'] = sfreq_new / 4.  # suppress aliasing warnings
     picks = pick_types(raw.info, meg=True, eeg=True, exclude=())
-    epochs = Epochs(raw, events, 1, -0.2, 0.5, picks=picks, preload=True,
-                    add_eeg_ref=False)
+    epochs = Epochs(raw, events, 1, -0.2, 0.5, picks=picks, preload=True)
     for offset in (0, 1):
         ev_ep_decim = epochs.copy().decimate(decim, offset).average()
         ev_decim = epochs.average().decimate(decim, offset)
@@ -274,7 +273,7 @@ def test_to_data_frame():
     assert_raises(ValueError, ave.to_data_frame, picks=np.arange(400))
     df = ave.to_data_frame()
     assert_true((df.columns == ave.ch_names).all())
-    df = ave.to_data_frame(index=None).reset_index('time')
+    df = ave.to_data_frame(index=None).reset_index()
     assert_true('time' in df.columns)
     assert_array_equal(df.values[:, 1], ave.data[0] * 1e13)
     assert_array_equal(df.values[:, 3], ave.data[2] * 1e15)
@@ -327,6 +326,10 @@ def test_get_peak():
                                         time_as_index=True)
     assert_true(time_idx < len(evoked.times))
     assert_equal(ch_name, 'MEG 1421')
+
+    assert_raises(ValueError, evoked.get_peak, ch_type='mag', merge_grads=True)
+    ch_name, time_idx = evoked.get_peak(ch_type='grad', merge_grads=True)
+    assert_equal(ch_name, 'MEG 244X')
 
     data = np.array([[0., 1.,  2.],
                      [0., -3.,  0]])
@@ -417,8 +420,7 @@ def test_arithmetic():
     # combine_evoked([ev1, ev2]) should be the same as ev1 + ev2:
     # data should be added according to their `nave` weights
     # nave = ev1.nave + ev2.nave
-    with warnings.catch_warnings(record=True):  # deprecation no weights
-        ev = combine_evoked([ev1, ev2])
+    ev = combine_evoked([ev1, ev2], weights='nave')
     assert_equal(ev.nave, ev1.nave + ev2.nave)
     assert_allclose(ev.data, 1. / 3. * np.ones_like(ev.data))
 
@@ -516,7 +518,7 @@ def test_array_epochs():
 
     # test kind check
     assert_raises(TypeError, EvokedArray, data1, info, tmin=0, kind=1)
-    assert_raises(ValueError, EvokedArray, data1, info, tmin=0, kind='mean')
+    assert_raises(ValueError, EvokedArray, data1, info, kind='mean')
 
     # test match between channels info and data
     ch_names = ['EEG %03d' % (i + 1) for i in range(19)]

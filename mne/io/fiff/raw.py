@@ -17,17 +17,18 @@ from ..open import fiff_open, _fiff_get_fid, _get_next_fname
 from ..meas_info import read_meas_info
 from ..tree import dir_tree_find
 from ..tag import read_tag, read_tag_info
-from ..proj import make_eeg_average_ref_proj, _needs_eeg_average_ref_proj
-from ..base import (_BaseRaw, _RawShell, _check_raw_compatibility,
+from ..base import (BaseRaw, _RawShell, _check_raw_compatibility,
                     _check_maxshield)
 from ..utils import _mult_cal_one
 
-from ...annotations import Annotations, _combine_annotations
+from ...annotations import Annotations, _combine_annotations, _sync_onset
+
+from ...event import AcqParserFIF
 from ...utils import check_fname, logger, verbose, warn
 
 
-class Raw(_BaseRaw):
-    """Raw data in FIF format
+class Raw(BaseRaw):
+    """Raw data in FIF format.
 
     Parameters
     ----------
@@ -37,36 +38,25 @@ class Raw(_BaseRaw):
         with raw.fif, raw.fif.gz, raw_sss.fif, raw_sss.fif.gz,
         raw_tsss.fif or raw_tsss.fif.gz.
     allow_maxshield : bool | str (default False)
-        allow_maxshield if True, allow loading of data that has been
-        processed with Maxshield. Maxshield-processed data should generally
-        not be loaded directly, but should be processed using SSS first.
-        Can also be "yes" to load without eliciting a warning.
+        If True, allow loading of data that has been recorded with internal
+        active compensation (MaxShield). Data recorded with MaxShield should
+        generally not be loaded directly, but should first be processed using
+        SSS/tSSS to remove the compensation signals that may also affect brain
+        activity. Can also be "yes" to load without eliciting a warning.
     preload : bool or str (default False)
         Preload data into memory for data manipulation and faster indexing.
         If True, the data will be preloaded into memory (fast, requires
         large amount of memory). If preload is a string, preload is the
         file name of a memory-mapped file which is used to store the data
         on the hard drive (slower, requires less memory).
-    proj : bool
-        Deprecated. Use :meth:`raw.apply_proj() <mne.io.Raw.apply_proj>`
-        instead.
-    compensation : None | int
-        Deprecated. Use :meth:`mne.io.Raw.apply_gradient_compensation`
-        instead.
-    add_eeg_ref : bool
-        If True, an EEG average reference will be added (unless one
-        already exists). The default value of True in 0.13 will change to
-        False in 0.14, and the parameter will be removed in 0.15. Use
-        :func:`mne.set_eeg_reference` instead.
-    fnames : list or str
-        Deprecated. Use :func:`mne.concatenate_raws` instead.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
 
     Attributes
     ----------
     info : dict
-        Measurement info.
+        :class:`Measurement info <mne.Info>`.
     ch_names : list of string
         List of channels' names.
     n_times : int
@@ -76,29 +66,12 @@ class Raw(_BaseRaw):
     verbose : bool, str, int, or None
         See above.
     """
+
     @verbose
     def __init__(self, fname, allow_maxshield=False, preload=False,
-                 proj=None, compensation=None, add_eeg_ref=None,
-                 fnames=None, verbose=None):
-        if not proj:
-            proj = False
-        else:
-            warn('The proj parameter has been dprecated and will be removed '
-                 'in 0.14. Use raw.apply_proj() instead.', DeprecationWarning)
-        dep = ('Supplying a list of filenames with "fnames" to the Raw class '
-               'has been deprecated and will be removed in 0.13. Use multiple '
-               'calls to read_raw_fif with the "fname" argument followed by '
-               'concatenate_raws instead.')
-        if fnames is not None:
-            warn(dep, DeprecationWarning)
-        else:
-            fnames = fname
+                 verbose=None):  # noqa: D102
+        fnames = [op.realpath(fname)]
         del fname
-        if not isinstance(fnames, list):
-            fnames = [fnames]
-        else:
-            warn(dep, DeprecationWarning)
-        fnames = [op.realpath(f) for f in fnames]
         split_fnames = []
 
         raws = []
@@ -112,14 +85,6 @@ class Raw(_BaseRaw):
                     warn('Split raw file detected but next file %s does not '
                          'exist.' % next_fname)
                     continue
-                if next_fname in fnames:
-                    # the user manually specified the split files
-                    logger.info('Note: %s is part of a split raw file. It is '
-                                'not necessary to manually specify the parts '
-                                'in this case; simply construct Raw using '
-                                'the name of the first file.' % next_fname)
-                    continue
-
                 # process this file next
                 fnames.insert(ii + 1, next_fname)
                 split_fnames.append(next_fname)
@@ -131,47 +96,44 @@ class Raw(_BaseRaw):
             [r.first_samp for r in raws], [r.last_samp for r in raws],
             [r.filename for r in raws], [r._raw_extras for r in raws],
             raws[0].orig_format, None, verbose=verbose)
-        if 'eeg' in self:
-            from ...epochs import _dep_eeg_ref
-            add_eeg_ref = _dep_eeg_ref(add_eeg_ref, True)
-
-        # combine information from each raw file to construct self
-        if add_eeg_ref and _needs_eeg_average_ref_proj(self.info):
-            eeg_ref = make_eeg_average_ref_proj(self.info, activate=False)
-            self.add_proj(eeg_ref)
 
         # combine annotations
-        self.annotations = raws[0].annotations
+        BaseRaw.annotations.fset(self, raws[0].annotations, False)
         if any([r.annotations for r in raws[1:]]):
-            first_samps = list()
-            last_samps = list()
+            first_samps = self._first_samps
+            last_samps = self._last_samps
             for r in raws:
+                annotations = _combine_annotations((self.annotations,
+                                                    r.annotations),
+                                                   last_samps, first_samps,
+                                                   r.info['sfreq'],
+                                                   self.info['meas_date'])
+                BaseRaw.annotations.fset(self, annotations, False)
                 first_samps = np.r_[first_samps, r.first_samp]
                 last_samps = np.r_[last_samps, r.last_samp]
-                self.annotations = _combine_annotations((self.annotations,
-                                                         r.annotations),
-                                                        last_samps,
-                                                        first_samps,
-                                                        r.info['sfreq'])
-        if compensation is not None:
-            warn('The "compensation" argument has been deprecated '
-                 'in favor of the "raw.apply_gradient_compensation" '
-                 'method and will be removed in 0.14',
-                 DeprecationWarning)
-            self.apply_gradient_compensation(compensation)
+
+        # Add annotations for in-data skips
+        offsets = [0] + self._raw_lengths[:-1]
+        for extra, first_samp, offset in zip(self._raw_extras,
+                                             self._first_samps, offsets):
+            for skip in extra:
+                if skip['ent'] is None:  # these are skips
+                    if self.annotations is None:
+                        self.annotations = Annotations((), (), ())
+                    start = skip['first'] - first_samp + offset
+                    stop = skip['last'] - first_samp - 1 + offset
+                    self.annotations.append(
+                        _sync_onset(self, start / self.info['sfreq']),
+                        (stop - start) / self.info['sfreq'], 'BAD_ACQ_SKIP')
         if preload:
             self._preload_data(preload)
         else:
             self.preload = False
 
-        # setup the SSP projector
-        if proj:
-            self.apply_proj()
-
     @verbose
     def _read_raw_file(self, fname, allow_maxshield, preload,
                        do_check_fname=True, verbose=None):
-        """Read in header information from a raw file"""
+        """Read in header information from a raw file."""
         logger.info('Opening raw data file %s...' % fname)
 
         if do_check_fname:
@@ -199,6 +161,8 @@ class Raw(_BaseRaw):
                     tag = read_tag(fid, pos)
                     if kind == FIFF.FIFF_MNE_BASELINE_MIN:
                         onset = tag.data
+                        if onset is None:
+                            break  # bug in 0.14 wrote empty annotations
                     elif kind == FIFF.FIFF_MNE_BASELINE_MAX:
                         duration = tag.data - onset
                     elif kind == FIFF.FIFF_COMMENT:
@@ -207,8 +171,9 @@ class Raw(_BaseRaw):
                                        description]
                     elif kind == FIFF.FIFF_MEAS_DATE:
                         orig_time = float(tag.data)
-                annotations = Annotations(onset, duration, description,
-                                          orig_time)
+                if onset is not None:
+                    annotations = Annotations(onset, duration, description,
+                                              orig_time)
 
             #   Locate the data of interest
             raw_node = dir_tree_find(meas, FIFF.FIFFB_RAW_DATA)
@@ -223,9 +188,6 @@ class Raw(_BaseRaw):
 
             if len(raw_node) == 1:
                 raw_node = raw_node[0]
-
-            #   Set up the output structure
-            info['filename'] = fname
 
             #   Process the directory
             directory = raw_node['directory']
@@ -262,6 +224,8 @@ class Raw(_BaseRaw):
 
             for k in range(first, nent):
                 ent = directory[k]
+                # There can be skips in the data (e.g., if the user unclicked)
+                # an re-clicked the button
                 if ent.kind == FIFF.FIFF_DATA_SKIP:
                     tag = read_tag(fid, ent.pos)
                     nskip = int(tag.data)
@@ -351,7 +315,7 @@ class Raw(_BaseRaw):
 
     @property
     def _dtype(self):
-        """Get the dtype to use to store data from disk"""
+        """Get the dtype to use to store data from disk."""
         if self._dtype_ is not None:
             return self._dtype_
         dtype = None
@@ -377,7 +341,7 @@ class Raw(_BaseRaw):
         return dtype
 
     def _read_segment_file(self, data, idx, fi, start, stop, cals, mult):
-        """Read a segment of data from a file"""
+        """Read a segment of data from a file."""
         stop -= 1
         offset = 0
         with _fiff_get_fid(self._filenames[fi]) as fid:
@@ -426,7 +390,7 @@ class Raw(_BaseRaw):
                     break
 
     def fix_mag_coil_types(self):
-        """Fix Elekta magnetometer coil types
+        """Fix Elekta magnetometer coil types.
 
         Returns
         -------
@@ -457,17 +421,27 @@ class Raw(_BaseRaw):
         fix_mag_coil_types(self.info)
         return self
 
+    @property
+    def acqparser(self):
+        """The AcqParserFIF for the measurement info.
+
+        See Also
+        --------
+        mne.AcqParserFIF
+        """
+        if getattr(self, '_acqparser', None) is None:
+            self._acqparser = AcqParserFIF(self.info)
+        return self._acqparser
+
 
 def _check_entry(first, nent):
-    """Helper to sanity check entries"""
+    """Sanity check entries."""
     if first >= nent:
         raise IOError('Could not read data, perhaps this is a corrupt file')
 
 
-def read_raw_fif(fname, allow_maxshield=False, preload=False,
-                 proj=False, compensation=None, add_eeg_ref=None,
-                 fnames=None, verbose=None):
-    """Reader function for Raw FIF data
+def read_raw_fif(fname, allow_maxshield=False, preload=False, verbose=None):
+    """Reader function for Raw FIF data.
 
     Parameters
     ----------
@@ -476,31 +450,21 @@ def read_raw_fif(fname, allow_maxshield=False, preload=False,
         the split part will be automatically loaded. Filenames should end
         with raw.fif, raw.fif.gz, raw_sss.fif, raw_sss.fif.gz,
         raw_tsss.fif or raw_tsss.fif.gz.
-    allow_maxshield : bool, (default False)
-        allow_maxshield if True, allow loading of data that has been
-        processed with Maxshield. Maxshield-processed data should generally
-        not be loaded directly, but should be processed using SSS first.
+    allow_maxshield : bool | str (default False)
+        If True, allow loading of data that has been recorded with internal
+        active compensation (MaxShield). Data recorded with MaxShield should
+        generally not be loaded directly, but should first be processed using
+        SSS/tSSS to remove the compensation signals that may also affect brain
+        activity. Can also be "yes" to load without eliciting a warning.
     preload : bool or str (default False)
         Preload data into memory for data manipulation and faster indexing.
         If True, the data will be preloaded into memory (fast, requires
         large amount of memory). If preload is a string, preload is the
         file name of a memory-mapped file which is used to store the data
         on the hard drive (slower, requires less memory).
-    proj : bool
-        Deprecated. Use :meth:`raw.apply_proj() <mne.io.Raw.apply_proj>`
-        instead.
-    compensation : None | int
-        Deprecated. Use :meth:`mne.io.Raw.apply_gradient_compensation`
-        instead.
-    add_eeg_ref : bool
-        If True, an EEG average reference will be added (unless one
-        already exists). The default value of True in 0.13 will change to
-        False in 0.14, and the parameter will be removed in 0.15. Use
-        :func:`mne.set_eeg_reference` instead.
-    fnames : list or str
-        Deprecated. Use :func:`mne.concatenate_raws` instead.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
 
     Returns
     -------
@@ -512,5 +476,4 @@ def read_raw_fif(fname, allow_maxshield=False, preload=False,
     .. versionadded:: 0.9.0
     """
     return Raw(fname=fname, allow_maxshield=allow_maxshield,
-               preload=preload, proj=proj, compensation=compensation,
-               add_eeg_ref=add_eeg_ref, fnames=fnames, verbose=verbose)
+               preload=preload, verbose=verbose)

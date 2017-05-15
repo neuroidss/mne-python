@@ -1,5 +1,5 @@
-"""Functions to plot on circle as for connectivity
-"""
+"""Functions to plot on circle as for connectivity."""
+
 from __future__ import print_function
 
 # Authors: Alexandre Gramfort <alexandre.gramfort@telecom-paristech.fr>
@@ -14,7 +14,7 @@ from functools import partial
 
 import numpy as np
 
-from .utils import plt_show
+from .utils import plt_show, _set_ax_facecolor
 from ..externals.six import string_types
 
 
@@ -94,9 +94,10 @@ def circular_layout(node_names, node_order, start_pos=90, start_between=True,
 def _plot_connectivity_circle_onpick(event, fig=None, axes=None, indices=None,
                                      n_nodes=0, node_angles=None,
                                      ylim=[9, 10]):
-    """Isolates connections around a single node when user left clicks a node.
+    """Isolate connections around a single node when user left clicks a node.
 
-    On right click, resets all connections."""
+    On right click, resets all connections.
+    """
     if event.inaxes != axes:
         return
 
@@ -268,7 +269,8 @@ def plot_connectivity_circle(con, node_names, indices=None, n_lines=None,
     # Use a polar axes
     if not isinstance(subplot, tuple):
         subplot = (subplot,)
-    axes = plt.subplot(*subplot, polar=True, axisbg=facecolor)
+    axes = plt.subplot(*subplot, polar=True)
+    _set_ax_facecolor(axes, facecolor)
 
     # No ticks, we'll put our own
     plt.xticks([])

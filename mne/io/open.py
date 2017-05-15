@@ -14,11 +14,11 @@ from .tag import read_tag_info, read_tag, read_big, Tag
 from .tree import make_dir_tree, dir_tree_find
 from .constants import FIFF
 from ..utils import logger, verbose
-from ..externals.six import string_types, iteritems
+from ..externals.six import string_types, iteritems, text_type
 
 
 def _fiff_get_fid(fname):
-    """Helper to open a FIF file with no additional parsing"""
+    """Open a FIF file with no additional parsing."""
     if isinstance(fname, string_types):
         if op.splitext(fname)[1].lower() == '.gz':
             logger.debug('Using gzip')
@@ -33,7 +33,7 @@ def _fiff_get_fid(fname):
 
 
 def _get_next_fname(fid, fname, tree):
-    """Auxiliary function to get the next filename in split files."""
+    """Get the next filename in split files."""
     nodes_list = dir_tree_find(tree, FIFF.FIFFB_REF)
     next_fname = None
     for nodes in nodes_list:
@@ -86,7 +86,8 @@ def fiff_open(fname, preload=False, verbose=None):
         requires more memory, but can be faster for I/O operations that require
         frequent seeks.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
 
     Returns
     -------
@@ -154,8 +155,8 @@ def fiff_open(fname, preload=False, verbose=None):
 
 
 def show_fiff(fname, indent='    ', read_limit=np.inf, max_str=30,
-              output=str, verbose=None):
-    """Show FIFF information
+              output=str, tag=None, verbose=None):
+    """Show FIFF information.
 
     This function is similar to mne_show_fiff.
 
@@ -173,25 +174,31 @@ def show_fiff(fname, indent='    ', read_limit=np.inf, max_str=30,
         each tag's data.
     output : type
         Either str or list. str is a convenience output for printing.
+    tag : int | None
+        Provide information about this tag. If None (default), all information
+        is shown.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see mne.verbose).
+        If not None, override default verbose level (see :func:`mne.verbose`
+        and :ref:`Logging documentation <tut_logging>` for more).
     """
     if output not in [list, str]:
         raise ValueError('output must be list or str')
+    if isinstance(tag, string_types):  # command mne show_fiff passes string
+        tag = int(tag)
     f, tree, directory = fiff_open(fname)
     # This gets set to 0 (unknown) by fiff_open, but FIFFB_ROOT probably
     # makes more sense for display
     tree['block'] = FIFF.FIFFB_ROOT
     with f as fid:
         out = _show_tree(fid, tree, indent=indent, level=0,
-                         read_limit=read_limit, max_str=max_str)
+                         read_limit=read_limit, max_str=max_str, tag_id=tag)
     if output == str:
         out = '\n'.join(out)
     return out
 
 
 def _find_type(value, fmts=['FIFF_'], exclude=['FIFF_UNIT']):
-    """Helper to find matching values"""
+    """Find matching values."""
     value = int(value)
     vals = [k for k, v in iteritems(FIFF)
             if v == value and any(fmt in k for fmt in fmts) and
@@ -201,14 +208,18 @@ def _find_type(value, fmts=['FIFF_'], exclude=['FIFF_UNIT']):
     return vals
 
 
-def _show_tree(fid, tree, indent, level, read_limit, max_str):
-    """Helper for showing FIFF"""
+def _show_tree(fid, tree, indent, level, read_limit, max_str, tag_id):
+    """Show FIFF tree."""
     from scipy import sparse
     this_idt = indent * level
     next_idt = indent * (level + 1)
     # print block-level information
     out = [this_idt + str(int(tree['block'])) + ' = ' +
            '/'.join(_find_type(tree['block'], fmts=['FIFFB_']))]
+    tag_found = False
+    if tag_id is None or out[0].strip().startswith(str(tag_id)):
+        tag_found = True
+
     if tree['directory'] is not None:
         kinds = [ent.kind for ent in tree['directory']] + [-1]
         sizes = [ent.size for ent in tree['directory']]
@@ -216,6 +227,8 @@ def _show_tree(fid, tree, indent, level, read_limit, max_str):
         counter = 0
         good = True
         for k, kn, size, pos in zip(kinds[:-1], kinds[1:], sizes, poss):
+            if not tag_found and k != tag_id:
+                continue
             tag = Tag(k, size, 0, pos)
             if read_limit is None or size <= read_limit:
                 try:
@@ -234,7 +247,7 @@ def _show_tree(fid, tree, indent, level, read_limit, max_str):
                 postpend = ''
                 # print tag data nicely
                 if tag.data is not None:
-                    postpend = ' = ' + str(tag.data)[:max_str]
+                    postpend = ' = ' + text_type(tag.data)[:max_str]
                     if isinstance(tag.data, np.ndarray):
                         if tag.data.size > 1:
                             postpend += ' ... array size=' + str(tag.data.size)
@@ -256,8 +269,13 @@ def _show_tree(fid, tree, indent, level, read_limit, max_str):
                 out[-1] = out[-1].replace('\n', u'¶')
                 counter = 0
                 good = True
-
+        if tag_id in kinds:
+            tag_found = True
+    if not tag_found:
+        out = ['']
+        level = -1  # removes extra indent
     # deal with children
     for branch in tree['children']:
-        out += _show_tree(fid, branch, indent, level + 1, read_limit, max_str)
+        out += _show_tree(fid, branch, indent, level + 1, read_limit, max_str,
+                          tag_id)
     return out

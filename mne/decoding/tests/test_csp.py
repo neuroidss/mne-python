@@ -1,16 +1,18 @@
 # Author: Alexandre Gramfort <alexandre.gramfort@telecom-paristech.fr>
 #         Romain Trachel <trachelr@gmail.com>
+#         Alexandre Barachant <alexandre.barachant@gmail.com>
+#         Jean-Remi King <jeanremi.king@gmail.com>
 #
 # License: BSD (3-clause)
 
 import os.path as op
 
-from nose.tools import assert_true, assert_raises, assert_equal
+from nose.tools import assert_true, assert_raises, assert_equal, assert_greater
 import numpy as np
 from numpy.testing import assert_array_almost_equal, assert_array_equal
 
 from mne import io, Epochs, read_events, pick_types
-from mne.decoding.csp import CSP, _ajd_pham
+from mne.decoding.csp import CSP, _ajd_pham, SPoC
 from mne.utils import requires_sklearn, slow_test
 
 data_dir = op.join(op.dirname(__file__), '..', '..', 'io', 'tests', 'data')
@@ -23,39 +25,61 @@ event_id = dict(aud_l=1, vis_l=3)
 start, stop = 0, 8
 
 
+def simulate_data(target, n_trials=100, n_channels=10, random_state=42):
+    """Simulate data according to an instantaneous mixin model.
+
+    Data are simulated in the statistical source space, where one source is
+    modulated according to a target variable, before being mixed with a
+    random mixing matrix.
+    """
+    rs = np.random.RandomState(random_state)
+
+    # generate a orthogonal mixin matrix
+    mixing_mat = np.linalg.svd(rs.randn(n_channels, n_channels))[0]
+
+    S = rs.randn(n_trials, n_channels, 50)
+    S[:, 0] *= np.atleast_2d(np.sqrt(target)).T
+    S[:, 1:] *= 0.01  # less noise
+
+    X = np.dot(mixing_mat, S).transpose((1, 0, 2))
+
+    return X, mixing_mat
+
+
 @slow_test
 def test_csp():
     """Test Common Spatial Patterns algorithm on epochs
     """
-    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
+    raw = io.read_raw_fif(raw_fname, preload=False)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[2:12:3]  # subselect channels -> disable proj!
     raw.add_proj([], remove_existing=True)
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True, proj=False,
-                    add_eeg_ref=False)
+                    baseline=(None, 0), preload=True, proj=False)
     epochs_data = epochs.get_data()
     n_channels = epochs_data.shape[1]
     y = epochs.events[:, -1]
 
     # Init
-    assert_raises(ValueError, CSP, n_components='foo')
+    assert_raises(ValueError, CSP, n_components='foo', norm_trace=False)
     for reg in ['foo', -0.1, 1.1]:
-        assert_raises(ValueError, CSP, reg=reg)
+        assert_raises(ValueError, CSP, reg=reg, norm_trace=False)
     for reg in ['oas', 'ledoit_wolf', 0, 0.5, 1.]:
-        CSP(reg=reg)
+        CSP(reg=reg, norm_trace=False)
     for cov_est in ['foo', None]:
-        assert_raises(ValueError, CSP, cov_est=cov_est)
+        assert_raises(ValueError, CSP, cov_est=cov_est, norm_trace=False)
+    assert_raises(ValueError, CSP, norm_trace='foo')
     for cov_est in ['concat', 'epoch']:
-        CSP(cov_est=cov_est)
+        CSP(cov_est=cov_est, norm_trace=False)
 
     n_components = 3
-    csp = CSP(n_components=n_components)
-
     # Fit
-    csp.fit(epochs_data, epochs.events[:, -1])
+    for norm_trace in [True, False]:
+        csp = CSP(n_components=n_components, norm_trace=norm_trace)
+        csp.fit(epochs_data, epochs.events[:, -1])
+
     assert_equal(len(csp.mean_), n_components)
     assert_equal(len(csp.std_), n_components)
 
@@ -80,26 +104,16 @@ def test_csp():
     for plot in (csp.plot_patterns, csp.plot_filters):
         plot(epochs.info, components=components, res=12, show=False, cmap=cmap)
 
-    # Test covariance estimation methods (results should be roughly equal)
-    np.random.seed(0)
-    csp_epochs = CSP(cov_est="epoch")
-    csp_epochs.fit(epochs_data, y)
-    for attr in ('filters_', 'patterns_'):
-        corr = np.corrcoef(getattr(csp, attr).ravel(),
-                           getattr(csp_epochs, attr).ravel())[0, 1]
-        assert_true(corr >= 0.94)
-
     # Test with more than 2 classes
     epochs = Epochs(raw, events, tmin=tmin, tmax=tmax, picks=picks,
                     event_id=dict(aud_l=1, aud_r=2, vis_l=3, vis_r=4),
-                    baseline=(None, 0), proj=False, preload=True,
-                    add_eeg_ref=False)
+                    baseline=(None, 0), proj=False, preload=True)
     epochs_data = epochs.get_data()
     n_channels = epochs_data.shape[1]
 
     n_channels = epochs_data.shape[1]
     for cov_est in ['concat', 'epoch']:
-        csp = CSP(n_components=n_components, cov_est=cov_est)
+        csp = CSP(n_components=n_components, cov_est=cov_est, norm_trace=False)
         csp.fit(epochs_data, epochs.events[:, 2]).transform(epochs_data)
         assert_equal(len(csp._classes), 4)
         assert_array_equal(csp.filters_.shape, [n_channels, n_channels])
@@ -111,7 +125,7 @@ def test_csp():
     feature_shape = [len(epochs_data), n_components]
     X_trans = dict()
     for log in (None, True, False):
-        csp = CSP(n_components=n_components, log=log)
+        csp = CSP(n_components=n_components, log=log, norm_trace=False)
         assert_true(csp.log is log)
         Xt = csp.fit_transform(epochs_data, epochs.events[:, 2])
         assert_array_equal(Xt.shape, feature_shape)
@@ -124,35 +138,55 @@ def test_csp():
     assert_raises(ValueError, CSP, transform_into='average_power', log='foo')
 
     # Test csp space transform
-    csp = CSP(transform_into='csp_space')
+    csp = CSP(transform_into='csp_space', norm_trace=False)
     assert_true(csp.transform_into == 'csp_space')
     for log in ('foo', True, False):
-        assert_raises(ValueError, CSP, transform_into='csp_space', log=log)
+        assert_raises(ValueError, CSP, transform_into='csp_space', log=log,
+                      norm_trace=False)
     n_components = 2
-    csp = CSP(n_components=n_components, transform_into='csp_space')
+    csp = CSP(n_components=n_components, transform_into='csp_space',
+              norm_trace=False)
     Xt = csp.fit(epochs_data, epochs.events[:, 2]).transform(epochs_data)
     feature_shape = [len(epochs_data), n_components, epochs_data.shape[2]]
     assert_array_equal(Xt.shape, feature_shape)
 
+    # Check mixing matrix on simulated data
+    y = np.array([100] * 50 + [1] * 50)
+    X, A = simulate_data(y)
+
+    for cov_est in ['concat', 'epoch']:
+        # fit csp
+        csp = CSP(n_components=1, cov_est=cov_est, norm_trace=False)
+        csp.fit(X, y)
+
+        # check the first pattern match the mixing matrix
+        # the sign might change
+        corr = np.abs(np.corrcoef(csp.patterns_[0, :].T, A[:, 0])[0, 1])
+        assert_greater(np.abs(corr), 0.99)
+
+        # check output
+        out = csp.transform(X)
+        corr = np.abs(np.corrcoef(out[:, 0], y)[0, 1])
+        assert_greater(np.abs(corr), 0.95)
+
 
 @requires_sklearn
 def test_regularized_csp():
-    """Test Common Spatial Patterns algorithm using regularized covariance
-    """
-    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
+    """Test Common Spatial Patterns algorithm using regularized covariance."""
+    raw = io.read_raw_fif(raw_fname)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
     picks = picks[1:13:3]
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=(None, 0), preload=True, add_eeg_ref=False)
+                    baseline=(None, 0), preload=True)
     epochs_data = epochs.get_data()
     n_channels = epochs_data.shape[1]
 
     n_components = 3
     reg_cov = [None, 0.05, 'ledoit_wolf', 'oas']
     for reg in reg_cov:
-        csp = CSP(n_components=n_components, reg=reg)
+        csp = CSP(n_components=n_components, reg=reg, norm_trace=False)
         csp.fit(epochs_data, epochs.events[:, -1])
         y = epochs.events[:, -1]
         X = csp.fit_transform(epochs_data, y)
@@ -178,7 +212,7 @@ def test_csp_pipeline():
     """
     from sklearn.svm import SVC
     from sklearn.pipeline import Pipeline
-    csp = CSP(reg=1)
+    csp = CSP(reg=1, norm_trace=False)
     svc = SVC()
     pipe = Pipeline([("CSP", csp), ("SVC", svc)])
     pipe.set_params(CSP__reg=0.2)
@@ -204,3 +238,43 @@ def test_ajd():
                 [0.694689013234610, 0.775690358505945, -1.162043086446043],
                 [-0.592603135588066, -0.598996925696260, 1.009550086271192]]
     assert_array_almost_equal(V, V_matlab)
+
+
+def test_spoc():
+    X = np.random.randn(10, 10, 20)
+    y = np.random.randn(10)
+
+    spoc = SPoC(n_components=4)
+    spoc.fit(X, y)
+    Xt = spoc.transform(X)
+    assert_array_equal(Xt.shape, [10, 4])
+    spoc = SPoC(n_components=4, transform_into='csp_space')
+    spoc.fit(X, y)
+    Xt = spoc.transform(X)
+    assert_array_equal(Xt.shape, [10, 4, 20])
+    assert_array_equal(spoc.filters_.shape, [10, 10])
+    assert_array_equal(spoc.patterns_.shape, [10, 10])
+
+    # check y
+    assert_raises(ValueError, spoc.fit, X, y * 0)
+
+    # Check that doesn't take CSP-spcific input
+    assert_raises(TypeError, SPoC, cov_est='epoch')
+
+    # Check mixing matrix on simulated data
+    rs = np.random.RandomState(42)
+    y = rs.rand(100) * 50 + 1
+    X, A = simulate_data(y)
+
+    # fit spoc
+    spoc = SPoC(n_components=1)
+    spoc.fit(X, y)
+
+    # check the first patterns match the mixing matrix
+    corr = np.abs(np.corrcoef(spoc.patterns_[0, :].T, A[:, 0])[0, 1])
+    assert_greater(np.abs(corr), 0.99)
+
+    # check output
+    out = spoc.transform(X)
+    corr = np.abs(np.corrcoef(out[:, 0], y)[0, 1])
+    assert_greater(np.abs(corr), 0.85)

@@ -28,7 +28,7 @@ warnings.simplefilter('always')
 
 
 def make_epochs():
-    raw = io.read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
+    raw = io.read_raw_fif(raw_fname)
     events = read_events(event_name)
     picks = pick_types(raw.info, meg='mag', stim=False, ecg=False,
                        eog=False, exclude='bads')
@@ -38,8 +38,7 @@ def make_epochs():
     # Test on time generalization within one condition
     with warnings.catch_warnings(record=True):
         epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                        baseline=(None, 0), preload=True, decim=decim,
-                        add_eeg_ref=False)
+                        baseline=(None, 0), preload=True, decim=decim)
     return epochs
 
 
@@ -60,13 +59,13 @@ def test_generalization_across_time():
     y_4classes = np.hstack((epochs.events[:7, 2], epochs.events[7:, 2] + 1))
     if check_version('sklearn', '0.18'):
         from sklearn.model_selection import (KFold, StratifiedKFold,
-                                             ShuffleSplit, LeaveOneLabelOut)
+                                             ShuffleSplit, LeaveOneGroupOut)
+        cv = LeaveOneGroupOut()
         cv_shuffle = ShuffleSplit()
-        cv = LeaveOneLabelOut()
         # XXX we cannot pass any other parameters than X and y to cv.split
         # so we have to build it before hand
         cv_lolo = [(train, test) for train, test in cv.split(
-                   X=y_4classes, y=y_4classes, labels=y_4classes)]
+                   y_4classes, y_4classes, y_4classes)]
 
         # With sklearn >= 0.17, `clf` can be identified as a regressor, and
         # the scoring metrics can therefore be automatically assigned.
@@ -323,9 +322,19 @@ def test_generalization_across_time():
     assert_true(0.0 <= np.min(scores) <= 1.0)
     assert_true(0.0 <= np.max(scores) <= 1.0)
 
+    # Test that error if cv is not partition
+    gat = GeneralizationAcrossTime(cv=cv_shuffle,
+                                   predict_mode='cross-validation')
+    gat.fit(epochs)
+    assert_raises(ValueError, gat.predict, epochs)
+    gat = GeneralizationAcrossTime(cv=cv_shuffle,
+                                   predict_mode='mean-prediction')
+    gat.fit(epochs)
+    gat.predict(epochs)
+
     # Test that gets error if train on one dataset, test on another, and don't
     # specify appropriate cv:
-    gat = GeneralizationAcrossTime(cv=cv_shuffle)
+    gat = GeneralizationAcrossTime()
     gat.fit(epochs)
     with warnings.catch_warnings(record=True):
         gat.fit(epochs)

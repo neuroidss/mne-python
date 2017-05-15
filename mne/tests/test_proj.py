@@ -10,14 +10,14 @@ import copy as cp
 
 import mne
 from mne.datasets import testing
-from mne import pick_types
 from mne.io import read_raw_fif
-from mne import compute_proj_epochs, compute_proj_evoked, compute_proj_raw
+from mne import (compute_proj_epochs, compute_proj_evoked, compute_proj_raw,
+                 pick_types, read_events, Epochs, sensitivity_map,
+                 read_source_estimate)
 from mne.io.proj import (make_projector, activate_proj,
                          _needs_eeg_average_ref_proj)
 from mne.proj import (read_proj, write_proj, make_eeg_average_ref_proj,
                       _has_eeg_average_ref_proj)
-from mne import read_events, Epochs, sensitivity_map, read_source_estimate
 from mne.tests.common import assert_naming
 from mne.utils import _TempDir, run_tests_if_main, slow_test
 
@@ -41,7 +41,7 @@ ecg_fname = op.join(sample_path, 'sample_audvis_ecg-proj.fif')
 
 def test_bad_proj():
     """Test dealing with bad projection application."""
-    raw = read_raw_fif(raw_fname, preload=True, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname, preload=True)
     events = read_events(event_fname)
     picks = pick_types(raw.info, meg=True, stim=False, ecg=False,
                        eog=False, exclude='bads')
@@ -49,19 +49,51 @@ def test_bad_proj():
     _check_warnings(raw, events, picks)
     # still bad
     raw.pick_channels([raw.ch_names[ii] for ii in picks])
-    _check_warnings(raw, events, np.arange(len(raw.ch_names)))
+    _check_warnings(raw, events)
     # "fixed"
     raw.info.normalize_proj()  # avoid projection warnings
-    _check_warnings(raw, events, np.arange(len(raw.ch_names)), count=0)
+    _check_warnings(raw, events, count=0)
+    # eeg avg ref is okay
+    raw = read_raw_fif(raw_fname, preload=True).pick_types(meg=False, eeg=True)
+    raw.set_eeg_reference()
+    _check_warnings(raw, events, count=0)
+    raw.info['bads'] = raw.ch_names[:10]
+    _check_warnings(raw, events, count=0)
+
+    raw = read_raw_fif(raw_fname)
+    assert_raises(ValueError, raw.del_proj, 'foo')
+    n_proj = len(raw.info['projs'])
+    raw.del_proj(0)
+    assert_equal(len(raw.info['projs']), n_proj - 1)
+    raw.del_proj()
+    assert_equal(len(raw.info['projs']), 0)
+
+    # Ensure we deal with newer-style Neuromag projs properly, were getting:
+    #
+    #     Projection vector "PCA-v2" has magnitude 1.00 (should be unity),
+    #     applying projector with 101/306 of the original channels available
+    #     may be dangerous.
+    raw = read_raw_fif(raw_fname).crop(0, 1)
+    raw.info['bads'] = ['MEG 0111']
+    meg_picks = mne.pick_types(raw.info, meg=True, exclude=())
+    ch_names = [raw.ch_names[pick] for pick in meg_picks]
+    for p in raw.info['projs'][:-1]:
+        data = np.zeros((1, len(ch_names)))
+        idx = [ch_names.index(ch_name) for ch_name in p['data']['col_names']]
+        data[:, idx] = p['data']['data']
+        p['data'].update(ncol=len(meg_picks), col_names=ch_names, data=data)
+    with warnings.catch_warnings(record=True) as w:
+        mne.cov.regularize(mne.compute_raw_covariance(raw, verbose='error'),
+                           raw.info)
+    assert_equal(len(w), 0)
 
 
-def _check_warnings(raw, events, picks, count=3):
+def _check_warnings(raw, events, picks=None, count=3):
     """Helper to count warnings."""
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter('always')
         Epochs(raw, events, dict(aud_l=1, vis_l=3),
-               -0.2, 0.5, picks=picks, preload=True, proj=True,
-               add_eeg_ref=False)
+               -0.2, 0.5, picks=picks, preload=True, proj=True)
     assert_equal(len(w), count)
     for ww in w:
         assert_true('dangerous' in str(ww.message))
@@ -122,13 +154,13 @@ def test_compute_proj_epochs():
     tempdir = _TempDir()
     event_id, tmin, tmax = 1, -0.2, 0.3
 
-    raw = read_raw_fif(raw_fname, preload=True, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname, preload=True)
     events = read_events(event_fname)
     bad_ch = 'MEG 2443'
     picks = pick_types(raw.info, meg=True, eeg=False, stim=False, eog=False,
                        exclude=[])
     epochs = Epochs(raw, events, event_id, tmin, tmax, picks=picks,
-                    baseline=None, proj=False, add_eeg_ref=False)
+                    baseline=None, proj=False)
 
     evoked = epochs.average()
     projs = compute_proj_epochs(epochs, n_grad=1, n_mag=1, n_eeg=0, n_jobs=1)
@@ -199,7 +231,7 @@ def test_compute_proj_raw():
     tempdir = _TempDir()
     # Test that the raw projectors work
     raw_time = 2.5  # Do shorter amount for speed
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False).crop(0, raw_time)
+    raw = read_raw_fif(raw_fname).crop(0, raw_time)
     raw.load_data()
     for ii in (0.25, 0.5, 1, 2):
         with warnings.catch_warnings(record=True) as w:
@@ -263,7 +295,7 @@ def test_compute_proj_raw():
 
 def test_make_eeg_average_ref_proj():
     """Test EEG average reference projection."""
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False, preload=True)
+    raw = read_raw_fif(raw_fname, preload=True)
     eeg = mne.pick_types(raw.info, meg=False, eeg=True)
 
     # No average EEG reference
@@ -285,27 +317,27 @@ def test_has_eeg_average_ref_proj():
     """Test checking whether an EEG average reference exists"""
     assert_true(not _has_eeg_average_ref_proj([]))
 
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False, preload=False)
+    raw = read_raw_fif(raw_fname)
     raw.set_eeg_reference()
     assert_true(_has_eeg_average_ref_proj(raw.info['projs']))
 
 
 def test_needs_eeg_average_ref_proj():
     """Test checking whether a recording needs an EEG average reference"""
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False, preload=False)
+    raw = read_raw_fif(raw_fname)
     assert_true(_needs_eeg_average_ref_proj(raw.info))
 
     raw.set_eeg_reference()
     assert_true(not _needs_eeg_average_ref_proj(raw.info))
 
     # No EEG channels
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False, preload=True)
+    raw = read_raw_fif(raw_fname, preload=True)
     eeg = [raw.ch_names[c] for c in pick_types(raw.info, meg=False, eeg=True)]
     raw.drop_channels(eeg)
     assert_true(not _needs_eeg_average_ref_proj(raw.info))
 
     # Custom ref flag set
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False, preload=False)
+    raw = read_raw_fif(raw_fname)
     raw.info['custom_ref_applied'] = True
     assert_true(not _needs_eeg_average_ref_proj(raw.info))
 

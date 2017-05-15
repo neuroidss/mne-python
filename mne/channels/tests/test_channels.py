@@ -65,7 +65,7 @@ def test_rename_channels():
 
 def test_set_channel_types():
     """Test set_channel_types"""
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname)
     # Error Tests
     # Test channel name exists in ch_names
     mapping = {'EEG 160': 'EEG060'}
@@ -75,10 +75,11 @@ def test_set_channel_types():
     assert_raises(ValueError, raw.set_channel_types, mapping)
     # Test changing type if in proj (avg eeg ref here)
     mapping = {'EEG 058': 'ecog', 'EEG 059': 'ecg', 'EEG 060': 'eog',
-               'EOG 061': 'seeg', 'MEG 2441': 'eeg', 'MEG 2443': 'eeg'}
+               'EOG 061': 'seeg', 'MEG 2441': 'eeg', 'MEG 2443': 'eeg',
+               'MEG 2442': 'hbo'}
     assert_raises(RuntimeError, raw.set_channel_types, mapping)
     # Test type change
-    raw2 = read_raw_fif(raw_fname, add_eeg_ref=False)
+    raw2 = read_raw_fif(raw_fname)
     raw2.info['bads'] = ['EEG 059', 'EEG 060', 'EOG 061']
     with warnings.catch_warnings(record=True):  # MEG channel change
         assert_raises(RuntimeError, raw2.set_channel_types, mapping)  # has prj
@@ -109,6 +110,10 @@ def test_set_channel_types():
         assert_true(info['chs'][idx]['kind'] == FIFF.FIFFV_EEG_CH)
         assert_true(info['chs'][idx]['unit'] == FIFF.FIFF_UNIT_V)
         assert_true(info['chs'][idx]['coil_type'] == FIFF.FIFFV_COIL_EEG)
+    idx = pick_channels(raw.ch_names, ['MEG 2442'])[0]
+    assert_true(info['chs'][idx]['kind'] == FIFF.FIFFV_FNIRS_CH)
+    assert_true(info['chs'][idx]['unit'] == FIFF.FIFF_UNIT_MOL)
+    assert_true(info['chs'][idx]['coil_type'] == FIFF.FIFFV_COIL_FNIRS_HBO)
 
     # Test meaningful error when setting channel type with unknown unit
     raw.info['chs'][0]['unit'] = 0.
@@ -159,7 +164,7 @@ def test_read_ch_connectivity():
 
 def test_get_set_sensor_positions():
     """Test get/set functions for sensor positions"""
-    raw1 = read_raw_fif(raw_fname, add_eeg_ref=False)
+    raw1 = read_raw_fif(raw_fname)
     picks = pick_types(raw1.info, meg=False, eeg=True)
     pos = np.array([ch['loc'][:3] for ch in raw1.info['chs']])[picks]
     raw_pos = raw1._get_channel_positions(picks=picks)
@@ -167,7 +172,7 @@ def test_get_set_sensor_positions():
 
     ch_name = raw1.info['ch_names'][13]
     assert_raises(ValueError, raw1._set_channel_positions, [1, 2], ['name'])
-    raw2 = read_raw_fif(raw_fname, add_eeg_ref=False)
+    raw2 = read_raw_fif(raw_fname)
     raw2.info['chs'][13]['loc'][:3] = np.array([1, 2, 3])
     raw1._set_channel_positions([[1, 2, 3]], [ch_name])
     assert_array_equal(raw1.info['chs'][13]['loc'],

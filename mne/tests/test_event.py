@@ -4,15 +4,17 @@ import os
 from nose.tools import assert_true, assert_raises
 import numpy as np
 from numpy.testing import (assert_array_almost_equal, assert_array_equal,
-                           assert_equal)
+                           assert_equal, assert_allclose)
 import warnings
 
 from mne import (read_events, write_events, make_fixed_length_events,
-                 find_events, pick_events, find_stim_steps, pick_channels)
+                 find_events, pick_events, find_stim_steps, pick_channels,
+                 read_evokeds, Epochs)
 from mne.io import read_raw_fif
 from mne.tests.common import assert_naming
 from mne.utils import _TempDir, run_tests_if_main
-from mne.event import define_target_events, merge_events
+from mne.event import define_target_events, merge_events, AcqParserFIF
+from mne.datasets import testing
 
 warnings.simplefilter('always')
 
@@ -23,6 +25,11 @@ fname_1 = op.join(base_dir, 'test-1-eve.fif')
 fname_txt = op.join(base_dir, 'test-eve.eve')
 fname_txt_1 = op.join(base_dir, 'test-eve-1.eve')
 
+# for testing Elekta averager
+elekta_base_dir = op.join(testing.data_path(download=False), 'misc')
+fname_raw_elekta = op.join(elekta_base_dir, 'test_elekta_3ch_raw.fif')
+fname_ave_elekta = op.join(elekta_base_dir, 'test_elekta-ave.fif')
+
 # using mne_process_raw --raw test_raw.fif --eventsout test-mpr-eve.eve:
 fname_txt_mpr = op.join(base_dir, 'test-mpr-eve.eve')
 fname_old_txt = op.join(base_dir, 'test-eve-old-style.eve')
@@ -31,7 +38,7 @@ raw_fname = op.join(base_dir, 'test_raw.fif')
 
 def test_fix_stim():
     """Test fixing stim STI016 for Neuromag."""
-    raw = read_raw_fif(raw_fname, preload=True, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname, preload=True)
     # 32768 (016) + 3 (002+001) bits gets incorrectly coded during acquisition
     raw._data[raw.ch_names.index('STI 014'), :3] = [0, -32765, 0]
     with warnings.catch_warnings(record=True) as w:
@@ -46,10 +53,10 @@ def test_fix_stim():
 def test_add_events():
     """Test adding events to a Raw file."""
     # need preload
-    raw = read_raw_fif(raw_fname, preload=False, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname)
     events = np.array([[raw.first_samp, 0, 1]])
     assert_raises(RuntimeError, raw.add_events, events, 'STI 014')
-    raw = read_raw_fif(raw_fname, preload=True, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname, preload=True)
     orig_events = find_events(raw, 'STI 014')
     # add some events
     events = np.array([raw.first_samp, 0, 1])
@@ -172,7 +179,7 @@ def test_io_events():
 def test_find_events():
     """Test find events in raw file."""
     events = read_events(fname)
-    raw = read_raw_fif(raw_fname, preload=True, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname, preload=True)
     # let's test the defaulting behavior while we're at it
     extra_ends = ['', '_1']
     orig_envs = [os.getenv('MNE_STIM_CHANNEL%s' % s) for s in extra_ends]
@@ -359,7 +366,7 @@ def test_pick_events():
 
 def test_make_fixed_length_events():
     """Test making events of a fixed length."""
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname)
     events = make_fixed_length_events(raw, id=1)
     assert_true(events.shape[1], 3)
     events_zero = make_fixed_length_events(raw, 1, first_samp=False)
@@ -383,7 +390,7 @@ def test_make_fixed_length_events():
 def test_define_events():
     """Test defining response events."""
     events = read_events(fname)
-    raw = read_raw_fif(raw_fname, add_eeg_ref=False)
+    raw = read_raw_fif(raw_fname)
     events_, _ = define_target_events(events, 5, 32, raw.info['sfreq'],
                                       .2, 0.7, 42, 99)
     n_target = events[events[:, 2] == 5].shape[0]
@@ -409,5 +416,77 @@ def test_define_events():
 
     assert_array_equal(true_lag_fill, lag_fill)
     assert_array_equal(true_lag_nofill, lag_nofill)
+
+
+@testing.requires_testing_data
+def test_acqparser():
+    """ Test AcqParserFIF """
+    # no acquisition parameters
+    assert_raises(ValueError, AcqParserFIF, {'acq_pars': ''})
+    # invalid acquisition parameters
+    assert_raises(ValueError, AcqParserFIF, {'acq_pars': 'baaa'})
+    assert_raises(ValueError, AcqParserFIF, {'acq_pars': 'ERFVersion\n1'})
+    # test oldish file
+    raw = read_raw_fif(raw_fname, preload=False)
+    acqp = AcqParserFIF(raw.info)
+    # test __repr__()
+    assert_true(repr(acqp))
+    # old file should trigger compat mode
+    assert_true(acqp.compat)
+    # count events and categories
+    assert_equal(len(acqp.categories), 6)
+    assert_equal(len(acqp._categories), 17)
+    assert_equal(len(acqp.events), 6)
+    assert_equal(len(acqp._events), 17)
+    # get category
+    assert_true(acqp['Surprise visual'])
+    # test TRIUX file
+    raw = read_raw_fif(fname_raw_elekta, preload=False)
+    acqp = raw.acqparser
+    assert_true(acqp is raw.acqparser)  # same one, not regenerated
+    # test __repr__()
+    assert_true(repr(acqp))
+    # this file should not be in compatibility mode
+    assert_true(not acqp.compat)
+    # nonexisting category
+    assert_raises(KeyError, acqp.__getitem__, 'does not exist')
+    assert_raises(KeyError, acqp.get_condition, raw, 'foo')
+    # category not a string
+    assert_raises(ValueError, acqp.__getitem__, 0)
+    # number of events / categories
+    assert_equal(len(acqp), 7)
+    assert_equal(len(acqp.categories), 7)
+    assert_equal(len(acqp._categories), 32)
+    assert_equal(len(acqp.events), 6)
+    assert_equal(len(acqp._events), 32)
+    # get category
+    assert_true(acqp['Test event 5'])
+
+
+@testing.requires_testing_data
+def test_acqparser_averaging():
+    """ Test averaging with AcqParserFIF vs. Elekta software """
+    raw = read_raw_fif(fname_raw_elekta, preload=True)
+    acqp = AcqParserFIF(raw.info)
+    for cat in acqp.categories:
+        # XXX datasets match only when baseline is applied to both,
+        # not sure where relative dc shift comes from
+        cond = acqp.get_condition(raw, cat)
+        eps = Epochs(raw, baseline=(-.05, 0), **cond)
+        ev = eps.average()
+        ev_ref = read_evokeds(fname_ave_elekta, cat['comment'],
+                              baseline=(-.05, 0), proj=False)
+        ev_mag = ev.copy()
+        ev_mag.pick_channels(['MEG0111'])
+        ev_grad = ev.copy()
+        ev_grad.pick_channels(['MEG2643', 'MEG1622'])
+        ev_ref_mag = ev_ref.copy()
+        ev_ref_mag.pick_channels(['MEG0111'])
+        ev_ref_grad = ev_ref.copy()
+        ev_ref_grad.pick_channels(['MEG2643', 'MEG1622'])
+        assert_allclose(ev_mag.data, ev_ref_mag.data,
+                        rtol=0, atol=1e-15)  # tol = 1 fT
+        assert_allclose(ev_grad.data, ev_ref_grad.data,
+                        rtol=0, atol=1e-13)  # tol = 1 fT/cm
 
 run_tests_if_main()
