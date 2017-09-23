@@ -11,6 +11,7 @@ import os
 import os.path as op
 import shutil
 import sys
+from copy import deepcopy
 
 import numpy as np
 from scipy import linalg
@@ -59,6 +60,10 @@ class ConductorModel(dict):
             extra = ('BEM (%s layer%s)' % (len(self['surfs']),
                                            _pl(self['surfs'])))
         return '<ConductorModel  |  %s>' % extra
+
+    def copy(self):
+        """Return copy of ConductorModel instance."""
+        return deepcopy(self)
 
     @property
     def radius(self):
@@ -711,7 +716,7 @@ def make_sphere_model(r0=(0., 0., 0.04), head_radius=0.09, info=None,
     head_radius : float | str | None
         If float, compute spherical shells for EEG using the given radius.
         If 'auto', estimate an approriate radius from the dig points in Info,
-        If None, exclude shells.
+        If None, exclude shells (single layer sphere model).
     info : instance of Info | None
         Measurement info. Only needed if ``r0`` or ``head_radius`` are
         ``'auto'``.
@@ -1246,8 +1251,8 @@ def read_bem_surfaces(fname, patch_stats=False, s_id=None, verbose=None):
                 surf.append(this)
                 logger.info('[done]')
             logger.info('    %d BEM surfaces read' % len(surf))
-        if patch_stats:
-            for this in surf:
+        for this in surf:
+            if patch_stats or this['nn'] is None:
                 complete_surface_info(this, copy=False)
     return surf[0] if s_id is not None else surf
 
@@ -1304,7 +1309,7 @@ def _read_bem_surface(fid, this, def_coord_frame, s_id=None):
     if tag is None:
         tag = find_tag(fid, this, FIFF.FIFF_BEM_SURF_NORMALS)
     if tag is None:
-        res['nn'] = list()
+        res['nn'] = None
     else:
         res['nn'] = tag.data
         if res['nn'].shape[0] != res['np']:

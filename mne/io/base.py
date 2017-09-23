@@ -28,14 +28,17 @@ from .write import (start_file, end_file, start_block, end_block,
                     write_complex64, write_complex128, write_int,
                     write_id, write_string, write_name_list, _get_split_size)
 
+from ..annotations import _annotations_starts_stops
 from ..filter import (filter_data, notch_filter, resample, next_fast_len,
-                      _resample_stim_channels)
+                      _resample_stim_channels, _filt_check_picks,
+                      _filt_update_info)
 from ..parallel import parallel_func
 from ..utils import (_check_fname, _check_pandas_installed, sizeof_fmt,
                      _check_pandas_index_arguments,
                      check_fname, _get_stim_channel,
                      logger, verbose, _time_mask, warn, SizeMixin,
-                     copy_function_doc_to_method_doc)
+                     copy_function_doc_to_method_doc,
+                     _check_preload)
 from ..viz import plot_raw, plot_raw_psd, plot_raw_psd_topo
 from ..defaults import _handle_default
 from ..externals.six import string_types
@@ -151,7 +154,6 @@ class ToDataFrameMixin(object):
                 elif isinstance(self, Evoked):
                     data = self.data[picks, :]
                     times = self.times
-                    n_picks, n_times = data.shape
                 data = data.T
                 col_names = [self.ch_names[k] for k in picks]
 
@@ -167,7 +169,7 @@ class ToDataFrameMixin(object):
 
             for t in ch_types_used:
                 scaling = scalings[t]
-                idx = [picks[i] for i in range(len(picks)) if types[i] == t]
+                idx = [i for i in range(len(picks)) if types[i] == t]
                 if len(idx) > 0:
                     data[:, idx] *= scaling
         else:
@@ -737,7 +739,7 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         """Exit with block."""
         try:
             self.close()
-        except:
+        except Exception:
             return exception_type, exception_val, trace
 
     def _parse_get_set_params(self, item):
@@ -879,36 +881,23 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         if picks is None:
             picks = np.arange(self.info['nchan'])
         start = 0 if start is None else start
-        stop = self.n_times if stop is None else stop
+        stop = min(self.n_times if stop is None else stop, self.n_times)
         if self.annotations is None or reject_by_annotation is None:
             data, times = self[picks, start:stop]
-            if return_times:
-                return data, times
-            return data
+            return (data, times) if return_times else data
         if reject_by_annotation.lower() not in ['omit', 'nan']:
             raise ValueError("reject_by_annotation must be None, 'omit' or "
                              "'NaN'. Got %s." % reject_by_annotation)
-        sfreq = self.info['sfreq']
-        bads = [idx for idx, desc in enumerate(self.annotations.description)
-                if desc.upper().startswith('BAD')]
-        onsets = self.annotations.onset[bads]
-        onsets = _sync_onset(self, onsets)
-        ends = onsets + self.annotations.duration[bads]
-        omit = np.concatenate([np.where(onsets > stop / sfreq)[0],
-                               np.where(ends < start / sfreq)[0]])
-        onsets, ends = np.delete(onsets, omit), np.delete(ends, omit)
+        onsets, ends = _annotations_starts_stops(self, ['BAD'])
+        keep = (onsets < stop) & (ends > start)
+        onsets = np.maximum(onsets[keep], start)
+        ends = np.minimum(ends[keep], stop)
         if len(onsets) == 0:
             data, times = self[picks, start:stop]
             if return_times:
                 return data, times
             return data
-        stop = min(stop, self.n_times)
-        order = np.argsort(onsets)
-        onsets = self.time_as_index(onsets[order])
-        ends = self.time_as_index(ends[order])
 
-        np.clip(onsets, start, stop, onsets)
-        np.clip(ends, start, stop, ends)
         used = np.ones(stop - start, bool)
         for onset, end in zip(onsets, ends):
             if onset >= end:
@@ -1103,7 +1092,8 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     def filter(self, l_freq, h_freq, picks=None, filter_length='auto',
                l_trans_bandwidth='auto', h_trans_bandwidth='auto', n_jobs=1,
                method='fir', iir_params=None, phase='zero',
-               fir_window='hamming', fir_design=None, verbose=None):
+               fir_window='hamming', fir_design=None,
+               skip_by_annotation=None, pad='reflect_limited', verbose=None):
         """Filter a subset of channels.
 
         Applies a zero-phase low-pass, high-pass, band-pass, or band-stop
@@ -1200,7 +1190,26 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             time-domain design technique that generally gives improved
             attenuation using fewer samples than "firwin2".
 
-            ..versionadded:: 0.15
+            .. versionadded:: 0.15
+
+        skip_by_annotation : str | list of str
+            If a string (or list of str), any annotation segment that begins
+            with the given string will not be included in filtering, and
+            segments on either side of the given excluded annotated segment
+            will be filtered separately (i.e., as independent signals).
+            The default in 0.16 (``'edge'``) will separately filter any
+            segments that were concatenated by :func:`mne.concatenate_raws`
+            or :meth:`mne.io.Raw.append`. To disable, provide an empty list.
+
+            .. versionadded:: 0.16.
+        pad : str
+            The type of padding to use. Supports all :func:`np.pad` ``mode``
+            options. Can also be "reflect_limited" (default), which pads with a
+            reflected version of each vector mirrored on the first and last
+            values of the vector, followed by zeros.
+            Only used for ``method='fir'``.
+
+            .. versionadded:: 0.15
         verbose : bool, str, int, or None
             If not None, override default verbose level (see
             :func:`mne.verbose` and :ref:`Logging documentation <tut_logging>`
@@ -1225,38 +1234,34 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         and :ref:`tut_artifacts_filter`.
         """
         _check_preload(self, 'raw.filter')
-        data_picks = _pick_data_or_ica(self.info)
-        update_info = False
-        if picks is None:
-            picks = data_picks
-            update_info = True
-            # let's be safe.
-            if len(picks) == 0:
-                raise RuntimeError('Could not find any valid channels for '
-                                   'your Raw object. Please contact the '
-                                   'MNE-Python developers.')
-        elif h_freq is not None or l_freq is not None:
-            if np.in1d(data_picks, picks).all():
-                update_info = True
-            else:
-                logger.info('Filtering a subset of channels. The highpass and '
-                            'lowpass values in the measurement info will not '
-                            'be updated.')
-        filter_data(self._data, self.info['sfreq'], l_freq, h_freq, picks,
-                    filter_length, l_trans_bandwidth, h_trans_bandwidth,
-                    n_jobs, method, iir_params, copy=False, phase=phase,
-                    fir_window=fir_window, fir_design=fir_design)
+        update_info, picks = _filt_check_picks(self.info, picks,
+                                               l_freq, h_freq)
+        # Deal with annotations
+        if skip_by_annotation is None:
+            if self.annotations is not None and any(
+                    desc.upper().startswith('EDGE')
+                    for desc in self.annotations.description):
+                warn('skip_by_annotation defaults to [] in 0.15 but will '
+                     'change to "edge" in 0.16, set it explicitly to avoid '
+                     'this warning', DeprecationWarning)
+            skip_by_annotation = []
+        onsets, ends = _annotations_starts_stops(self, skip_by_annotation,
+                                                 'skip_by_annotation')
+        if len(onsets) == 0 or onsets[0] != 0:
+            onsets = np.concatenate([[0], onsets])
+            ends = np.concatenate([[0], ends])
+        if len(ends) == 1 or ends[-1] != len(self.times):
+            onsets = np.concatenate([onsets, [len(self.times)]])
+            ends = np.concatenate([ends, [len(self.times)]])
+        for start, stop in zip(ends[:-1], onsets[1:]):
+            filter_data(
+                self._data[:, start:stop], self.info['sfreq'], l_freq, h_freq,
+                picks, filter_length, l_trans_bandwidth, h_trans_bandwidth,
+                n_jobs, method, iir_params, copy=False, phase=phase,
+                fir_window=fir_window, fir_design=fir_design, pad=pad)
         # update info if filter is applied to all data channels,
         # and it's not a band-stop filter
-        if update_info:
-            if h_freq is not None and (l_freq is None or l_freq < h_freq) and \
-                    (self.info["lowpass"] is None or
-                     h_freq < self.info['lowpass']):
-                self.info['lowpass'] = float(h_freq)
-            if l_freq is not None and (h_freq is None or l_freq < h_freq) and \
-                    (self.info["highpass"] is None or
-                     l_freq > self.info['highpass']):
-                self.info['highpass'] = float(l_freq)
+        _filt_update_info(self.info, update_info, l_freq, h_freq)
         return self
 
     @verbose
@@ -1264,7 +1269,7 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                      notch_widths=None, trans_bandwidth=1.0, n_jobs=1,
                      method='fft', iir_params=None, mt_bandwidth=None,
                      p_value=0.05, phase='zero', fir_window='hamming',
-                     fir_design=None, verbose=None):
+                     fir_design=None, pad='reflect_limited', verbose=None):
         """Notch filter a subset of channels.
 
         Applies a zero-phase notch filter to the channels selected by
@@ -1348,6 +1353,14 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             attenuation using fewer samples than "firwin2".
 
             ..versionadded:: 0.15
+        pad : str
+            The type of padding to use. Supports all :func:`np.pad` ``mode``
+            options. Can also be "reflect_limited" (default), which pads with a
+            reflected version of each vector mirrored on the first and last
+            values of the vector, followed by zeros.
+            Only used for ``method='fir'``.
+
+            .. versionadded:: 0.15
         verbose : bool, str, int, or None
             If not None, override default verbose level (see
             :func:`mne.verbose` and :ref:`Logging documentation <tut_logging>`
@@ -1380,12 +1393,13 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
             notch_widths=notch_widths, trans_bandwidth=trans_bandwidth,
             method=method, iir_params=iir_params, mt_bandwidth=mt_bandwidth,
             p_value=p_value, picks=picks, n_jobs=n_jobs, copy=False,
-            phase=phase, fir_window=fir_window, fir_design=fir_design)
+            phase=phase, fir_window=fir_window, fir_design=fir_design,
+            pad=pad)
         return self
 
     @verbose
     def resample(self, sfreq, npad='auto', window='boxcar', stim_picks=None,
-                 n_jobs=1, events=None, verbose=None):
+                 n_jobs=1, events=None, pad='reflect_limited', verbose=None):
         """Resample all channels.
 
         The Raw object has to have the data loaded e.g. with ``preload=True``
@@ -1429,6 +1443,13 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         events : 2D array, shape (n_events, 3) | None
             An optional event matrix. When specified, the onsets of the events
             are resampled jointly with the data.
+        pad : str
+            The type of padding to use. Supports all :func:`np.pad` ``mode``
+            options. Can also be "reflect_limited" (default), which pads with a
+            reflected version of each vector mirrored on the first and last
+            values of the vector, followed by zeros.
+
+            .. versionadded:: 0.15
         verbose : bool, str, int, or None
             If not None, override default verbose level (see
             :func:`mne.verbose` and :ref:`Logging documentation <tut_logging>`
@@ -1459,7 +1480,7 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         if events is None:
             try:
                 original_events = find_events(self)
-            except:
+            except Exception:
                 pass
 
         sfreq = float(sfreq)
@@ -1479,7 +1500,7 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         for ri in range(len(self._raw_lengths)):
             data_chunk = self._data[:, offsets[ri]:offsets[ri + 1]]
             new_data.append(resample(data_chunk, sfreq, o_sfreq, npad,
-                                     window=window, n_jobs=n_jobs))
+                                     window=window, n_jobs=n_jobs, pad=pad))
             new_ntimes = new_data[ri].shape[1]
 
             # In empirical testing, it was faster to resample all channels
@@ -1512,7 +1533,7 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                          'information to become unreliable. Consider finding '
                          'events on the original data and passing the event '
                          'matrix as a parameter.')
-            except:
+            except Exception:
                 pass
 
             return self
@@ -1726,12 +1747,12 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
              show_options=False, title=None, show=True, block=False,
              highpass=None, lowpass=None, filtorder=4, clipping=None,
              show_first_samp=False, proj=True, group_by='type',
-             butterfly=False):
+             butterfly=False, decim='auto'):
         return plot_raw(self, events, duration, start, n_channels, bgcolor,
                         color, bad_color, event_color, scalings, remove_dc,
                         order, show_options, title, show, block, highpass,
                         lowpass, filtorder, clipping, show_first_samp, proj,
-                        group_by, butterfly)
+                        group_by, butterfly, decim)
 
     @verbose
     @copy_function_doc_to_method_doc(plot_raw_psd)
@@ -1740,13 +1761,14 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                  color='black', area_mode='std', area_alpha=0.33,
                  n_overlap=0, dB=True, average=None, show=True,
                  n_jobs=1, line_alpha=None, spatial_colors=None,
-                 xscale='linear', verbose=None):
+                 xscale='linear', reject_by_annotation=True, verbose=None):
         return plot_raw_psd(
             self, tmin=tmin, tmax=tmax, fmin=fmin, fmax=fmax, proj=proj,
             n_fft=n_fft, picks=picks, ax=ax, color=color, area_mode=area_mode,
             area_alpha=area_alpha, n_overlap=n_overlap, dB=dB, average=average,
             show=show, n_jobs=n_jobs, line_alpha=line_alpha,
-            spatial_colors=spatial_colors, xscale=xscale)
+            spatial_colors=spatial_colors, xscale=xscale,
+            reject_by_annotation=reject_by_annotation)
 
     @copy_function_doc_to_method_doc(plot_raw_psd_topo)
     def plot_psd_topo(self, tmin=0., tmax=None, fmin=0, fmax=100, proj=False,
@@ -1985,13 +2007,14 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         # now combine information from each raw file to construct new self
         annotations = self.annotations
         edge_samps = list()
-        for r in raws:
+        for ri, r in enumerate(raws):
             annotations = _combine_annotations((annotations, r.annotations),
                                                self._last_samps,
                                                self._first_samps,
                                                self.info['sfreq'],
                                                self.info['meas_date'])
-            edge_samps.append(sum(self._last_samps) - sum(self._first_samps))
+            edge_samps.append(sum(self._last_samps) -
+                              sum(self._first_samps) + (ri + 1))
             self._first_samps = np.r_[self._first_samps, r._first_samps]
             self._last_samps = np.r_[self._last_samps, r._last_samps]
             self._raw_extras += r._raw_extras
@@ -2003,9 +2026,8 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         self.annotations = annotations
         for edge_samp in edge_samps:
             onset = _sync_onset(self, (edge_samp) / self.info['sfreq'], True)
-            self.annotations.append(onset, (1. / self.info['sfreq']),
-                                    'BAD boundary')
-
+            self.annotations.append(onset, 0., 'BAD boundary')
+            self.annotations.append(onset, 0., 'EDGE boundary')
         if not (len(self._first_samps) == len(self._last_samps) ==
                 len(self._raw_extras) == len(self._filenames)):
             raise RuntimeError('Append error')  # should never happen
@@ -2075,14 +2097,6 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         if buffer_size_sec is None:
             buffer_size_sec = self.info.get('buffer_size_sec', 1.)
         return int(np.ceil(buffer_size_sec * self.info['sfreq']))
-
-
-def _check_preload(raw, msg):
-    """Ensure data are preloaded."""
-    if not raw.preload:
-        raise RuntimeError(msg + ' requires raw data to be loaded. Use '
-                           'preload=True (or string) in the constructor or '
-                           'raw.load_data().')
 
 
 def _allocate_data(data, data_buffer, data_shape, dtype):

@@ -488,7 +488,7 @@ class EpochsEEGLAB(BaseEpochs):
 
     @verbose
     def __init__(self, input_fname, events=None, event_id=None, tmin=0,
-                 baseline=None,  reject=None, flat=None, reject_tmin=None,
+                 baseline=None, reject=None, flat=None, reject_tmin=None,
                  reject_tmax=None, montage=None, eog=(), verbose=None,
                  uint16_codec=None):  # noqa: D102
         from scipy import io
@@ -510,7 +510,8 @@ class EpochsEEGLAB(BaseEpochs):
                 if isinstance(ep.eventtype, int):
                     ep.eventtype = str(ep.eventtype)
                 if not isinstance(ep.eventtype, string_types):
-                    event_type = '/'.join(ep.eventtype.tolist())
+                    event_type = '/'.join([str(et) for et
+                                           in ep.eventtype.tolist()])
                     event_name.append(event_type)
                     # store latency of only first event
                     event_latencies.append(eeg.event[ev_idx].latency)
@@ -641,8 +642,8 @@ def read_events_eeglab(eeg, event_id=None, event_id_func='strip_to_integer',
 
     See Also
     --------
-    find_events : Extract events from a stim channel. Note that stim channels
-        can only code for one event per time point.
+    mne.find_events : Extract events from a stim channel. Note that stim
+        channels can only code for one event per time point.
     """
     if event_id_func is 'strip_to_integer':
         event_id_func = _strip_to_integer

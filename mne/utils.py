@@ -7,6 +7,7 @@ from __future__ import print_function
 # License: BSD (3-clause)
 
 import atexit
+from collections import Iterable
 from distutils.version import LooseVersion
 from functools import wraps
 import ftplib
@@ -16,6 +17,8 @@ import inspect
 import json
 import logging
 from math import log, ceil
+import multiprocessing
+import operator
 import os
 import os.path as op
 import platform
@@ -27,6 +30,7 @@ import sys
 import tempfile
 import time
 import traceback
+from unittest import SkipTest
 import warnings
 import webbrowser
 
@@ -50,6 +54,7 @@ def _memory_usage(*args, **kwargs):
         args[0]()
     return [-1]
 
+
 try:
     from memory_profiler import memory_usage
 except ImportError:
@@ -71,6 +76,17 @@ _doc_special_members = ('__contains__', '__getitem__', '__iter__', '__len__',
 
 ###############################################################################
 # RANDOM UTILITIES
+
+
+def _ensure_int(x, name='unknown', must_be='an int'):
+    """Ensure a variable is an integer."""
+    # This is preferred over numbers.Integral, see:
+    # https://github.com/scipy/scipy/pull/7351#issuecomment-299713159
+    try:
+        x = int(operator.index(x))
+    except TypeError:
+        raise TypeError('%s must be %s, got %s' % (name, must_be, type(x)))
+    return x
 
 
 def _pl(x):
@@ -338,21 +354,26 @@ def warn(message, category=RuntimeWarning):
     import mne
     root_dir = op.dirname(mne.__file__)
     frame = None
-    stack = inspect.stack()
-    last_fname = ''
-    for fi, frame in enumerate(stack):
-        fname, lineno = frame[1:3]
-        if fname == '<string>' and last_fname == 'utils.py':  # in verbose dec
-            last_fname = fname
-            continue
-        # treat tests as scripts
-        # and don't capture unittest/case.py (assert_raises)
-        if not (fname.startswith(root_dir) or
-                ('unittest' in fname and 'case' in fname)) or \
-                op.basename(op.dirname(fname)) == 'tests':
-            break
-        last_fname = op.basename(fname)
     if logger.level <= logging.WARN:
+        last_fname = ''
+        frame = inspect.currentframe()
+        while frame:
+            fname = frame.f_code.co_filename
+            lineno = frame.f_lineno
+            # in verbose dec
+            if fname == '<string>' and last_fname == 'utils.py':
+                last_fname = fname
+                frame = frame.f_back
+                continue
+            # treat tests as scripts
+            # and don't capture unittest/case.py (assert_raises)
+            if not (fname.startswith(root_dir) or
+                    ('unittest' in fname and 'case' in fname)) or \
+                    op.basename(op.dirname(fname)) == 'tests':
+                break
+            last_fname = op.basename(fname)
+            frame = frame.f_back
+        del frame
         # We need to use this instead of warn(message, category, stacklevel)
         # because we move out of the MNE stack, so warnings won't properly
         # recognize the module name (and our warnings.simplefilter will fail)
@@ -726,21 +747,6 @@ class use_log_level(object):
         set_log_level(self.old_level)
 
 
-@nottest
-def slow_test(f):
-    """Mark slow tests (decorator)."""
-    f.slow_test = True
-    return f
-
-
-@nottest
-def ultra_slow_test(f):
-    """Mark ultra slow tests (decorator)."""
-    f.ultra_slow_test = True
-    f.slow_test = True
-    return f
-
-
 def has_nibabel(vox2ras_tkr=False):
     """Determine if nibabel is installed.
 
@@ -778,9 +784,10 @@ def has_freesurfer():
 
 def requires_nibabel(vox2ras_tkr=False):
     """Check for nibabel."""
+    import pytest
     extra = ' with vox2ras_tkr support' if vox2ras_tkr else ''
-    return np.testing.dec.skipif(not has_nibabel(vox2ras_tkr),
-                                 'Requires nibabel%s' % extra)
+    return pytest.mark.skipif(not has_nibabel(vox2ras_tkr),
+                              reason='Requires nibabel%s' % extra)
 
 
 def buggy_mkl_svd(function):
@@ -791,7 +798,6 @@ def buggy_mkl_svd(function):
             return function(*args, **kwargs)
         except np.linalg.LinAlgError as exp:
             if 'SVD did not converge' in str(exp):
-                from nose.plugins.skip import SkipTest
                 msg = 'Intel MKL SVD convergence error detected, skipping test'
                 warn(msg)
                 raise SkipTest(msg)
@@ -801,26 +807,25 @@ def buggy_mkl_svd(function):
 
 def requires_version(library, min_version):
     """Check for a library version."""
-    return np.testing.dec.skipif(not check_version(library, min_version),
-                                 'Requires %s version >= %s'
-                                 % (library, min_version))
+    import pytest
+    return pytest.mark.skipif(not check_version(library, min_version),
+                              reason=('Requires %s version >= %s'
+                                      % (library, min_version)))
 
 
 def requires_module(function, name, call=None):
     """Skip a test if package is not available (decorator)."""
     call = ('import %s' % name) if call is None else call
-    try:
-        from nose.plugins.skip import SkipTest
-    except ImportError:
-        SkipTest = AssertionError
 
     @wraps(function)
     def dec(*args, **kwargs):  # noqa: D102
         try:
             exec(call) in globals(), locals()
         except Exception as exc:
-            raise SkipTest('Test %s skipped, requires %s. Got exception (%s)'
-                           % (function.__name__, name, exc))
+            msg = 'Test %s skipped, requires %s.' % (function.__name__, name)
+            if len(str(exc)) > 0:
+                msg += ' Got exception (%s)' % (exc,)
+            raise SkipTest(msg)
         return function(*args, **kwargs)
     return dec
 
@@ -1011,14 +1016,6 @@ if version < required_version:
     raise ImportError
 """
 
-_sklearn_0_15_call = """
-required_version = '0.15'
-import sklearn
-version = LooseVersion(sklearn.__version__)
-if version < required_version:
-    raise ImportError
-"""
-
 _mayavi_call = """
 with warnings.catch_warnings(record=True):  # traits
     from mayavi import mlab
@@ -1047,8 +1044,6 @@ if not has_nibabel() and not has_freesurfer():
 
 requires_pandas = partial(requires_module, name='pandas', call=_pandas_call)
 requires_sklearn = partial(requires_module, name='sklearn', call=_sklearn_call)
-requires_sklearn_0_15 = partial(requires_module, name='sklearn',
-                                call=_sklearn_0_15_call)
 requires_mayavi = partial(requires_module, name='mayavi', call=_mayavi_call)
 requires_mne = partial(requires_module, name='MNE-C', call=_mne_call)
 requires_freesurfer = partial(requires_module, name='Freesurfer',
@@ -1060,7 +1055,6 @@ requires_fs_or_nibabel = partial(requires_module, name='nibabel or Freesurfer',
 
 requires_tvtk = partial(requires_module, name='TVTK',
                         call='from tvtk.api import tvtk')
-requires_statsmodels = partial(requires_module, name='statsmodels')
 requires_pysurfer = partial(requires_module, name='PySurfer',
                             call="""import warnings
 with warnings.catch_warnings(record=True):
@@ -1699,13 +1693,12 @@ class ProgressBar(object):
                  progress_character='.', spinner=False,
                  verbose_bool=True):  # noqa: D102
         self.cur_value = initial_value
-        if isinstance(max_value, (float, int)):
-            self.max_value = max_value
-            self.iterable = None
-        else:
-            # input is an iterable
+        if isinstance(max_value, Iterable):
             self.max_value = len(max_value)
             self.iterable = max_value
+        else:
+            self.max_value = float(max_value)
+            self.iterable = None
         self.mesg = mesg
         self.max_chars = max_chars
         self.progress_character = progress_character
@@ -2130,6 +2123,19 @@ def _check_subject(class_subject, input_subject, raise_error=True):
         return None
 
 
+def _check_preload(inst, msg):
+    """Ensure data are preloaded."""
+    from .epochs import BaseEpochs
+
+    name = 'raw'
+    if isinstance(inst, BaseEpochs):
+        name = 'epochs'
+    if not inst.preload:
+        raise RuntimeError(msg + ' requires %s data to be loaded. Use '
+                           'preload=True (or string) in the constructor or '
+                           '%s.load_data().' % (name, name))
+
+
 def _check_pandas_installed():
     """Aux function."""
     try:
@@ -2374,15 +2380,6 @@ def _time_mask(times, tmin=None, tmax=None, sfreq=None, raise_error=True):
     return mask
 
 
-def _get_fast_dot():
-    """Get fast dot."""
-    try:
-        from sklearn.utils.extmath import fast_dot
-    except ImportError:
-        fast_dot = np.dot
-    return fast_dot
-
-
 def random_permutation(n_samples, random_state=None):
     """Emulate the randperm matlab function.
 
@@ -2423,7 +2420,6 @@ def compute_corr(x, y):
     """Compute pearson correlations between a vector and a matrix."""
     if len(x) == 0 or len(y) == 0:
         raise ValueError('x or y has zero length')
-    fast_dot = _get_fast_dot()
     X = np.array(x, float)
     Y = np.array(y, float)
     X -= X.mean(0)
@@ -2432,7 +2428,7 @@ def compute_corr(x, y):
     # if covariance matrix is fully expanded, Y needs a
     # transpose / broadcasting else Y is correct
     y_sd = Y.std(0, ddof=1)[:, None if X.shape == Y.shape else Ellipsis]
-    return (fast_dot(X.T, Y) / float(len(X) - 1)) / (x_sd * y_sd)
+    return (np.dot(X.T, Y) / float(len(X) - 1)) / (x_sd * y_sd)
 
 
 def grand_average(all_inst, interpolate_bads=True, drop_bads=True):
@@ -2558,7 +2554,18 @@ def sys_info(fid=None, show_paths=False):
     ljust = 15
     out = 'Platform:'.ljust(ljust) + platform.platform() + '\n'
     out += 'Python:'.ljust(ljust) + str(sys.version).replace('\n', ' ') + '\n'
-    out += 'Executable:'.ljust(ljust) + sys.executable + '\n\n'
+    out += 'Executable:'.ljust(ljust) + sys.executable + '\n'
+    out += 'CPU:'.ljust(ljust) + ('%s: %s cores\n' %
+                                  (platform.processor(),
+                                   multiprocessing.cpu_count()))
+    out += 'Memory:'.ljust(ljust)
+    try:
+        import psutil
+    except ImportError:
+        out += 'Unavailable (requires "psutil" package)'
+    else:
+        out += '%0.1f GB\n' % (psutil.virtual_memory().total / float(2 ** 30),)
+    out += '\n'
     old_stdout = sys.stdout
     capture = StringIO()
     try:
@@ -2638,3 +2645,11 @@ def open_docs(kind=None, version=None):
         raise ValueError('version must be one of %s, got %s'
                          % (version, versions))
     webbrowser.open_new_tab('https://martinos.org/mne/%s/%s' % (version, kind))
+
+
+def _freqs_dep(freqs, frequencies, prefix=''):
+    if frequencies is not None:
+        freqs = frequencies
+        warn('%sfrequencies is deprecated and will be removed in 0.16, use '
+             '%sfreqs instead.' % (prefix, prefix), DeprecationWarning)
+    return freqs

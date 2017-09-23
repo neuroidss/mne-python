@@ -14,7 +14,6 @@ from copy import deepcopy
 import json
 import os.path as op
 from distutils.version import LooseVersion
-from numbers import Integral
 
 import numpy as np
 import scipy
@@ -37,13 +36,13 @@ from .evoked import EvokedArray, _check_decim
 from .baseline import rescale, _log_rescale
 from .channels.channels import (ContainsMixin, UpdateChannelsMixin,
                                 SetChannelsMixin, InterpolationMixin)
-from .filter import resample, detrend, FilterMixin
+from .filter import detrend, FilterMixin
 from .event import _read_events_fif, make_fixed_length_events
 from .fixes import _get_args
 from .viz import (plot_epochs, plot_epochs_psd, plot_epochs_psd_topomap,
                   plot_epochs_image, plot_topo_image_epochs, plot_drop_log)
 from .utils import (check_fname, logger, verbose, _check_type_picks,
-                    _time_mask, check_random_state, warn, _pl,
+                    _time_mask, check_random_state, warn, _pl, _ensure_int,
                     sizeof_fmt, SizeMixin, copy_function_doc_to_method_doc)
 from .externals.six import iteritems, string_types
 from .externals.six.moves import zip
@@ -204,9 +203,9 @@ class BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
 
     Notes
     -----
-    The `BaseEpochs` class is public to allow for stable type-checking in user
-    code (i.e., ``isinstance(my_epochs, BaseEpochs)``) but should not be used
-    as a constructor for Epochs objects (use instead `mne.Epochs`).
+    The ``BaseEpochs`` class is public to allow for stable type-checking in
+    user code (i.e., ``isinstance(my_epochs, BaseEpochs)``) but should not be
+    used as a constructor for Epochs objects (use instead :class:`mne.Epochs`).
     """
 
     def __init__(self, info, data, events, event_id=None, tmin=-0.2, tmax=0.5,
@@ -223,23 +222,21 @@ class BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
 
         # check out event_id dict
         if event_id is None:  # convert to int to make typing-checks happy
-            event_id = dict((str(e), int(e)) for e in np.unique(events[:, 2]))
-        elif isinstance(event_id, dict):
-            if not all(isinstance(v, Integral) for v in event_id.values()):
-                raise ValueError('Event IDs must be of type integer')
-            if not all(isinstance(k, string_types) for k in event_id):
-                raise ValueError('Event names must be of type str')
-            event_id = deepcopy(event_id)
+            event_id = list(np.unique(events[:, 2]))
+        if isinstance(event_id, dict):
+            for key in event_id.keys():
+                if not isinstance(key, string_types):
+                    raise TypeError('Event names must be of type str, '
+                                    'got %s (%s)' % (key, type(key)))
+            event_id = dict((key, _ensure_int(val, 'event_id[%s]' % key))
+                            for key, val in event_id.items())
         elif isinstance(event_id, list):
-            if not all(isinstance(v, Integral) for v in event_id):
-                raise ValueError('Event IDs must be of type integer')
+            event_id = [_ensure_int(v, 'event_id[%s]' % vi)
+                        for vi, v in enumerate(event_id)]
             event_id = dict(zip((str(i) for i in event_id), event_id))
-        elif isinstance(event_id, Integral):
-            event_id = {str(event_id): event_id}
         else:
-            raise ValueError('event_id must be dict or int.')
-        for k, v in event_id.items():
-            event_id[k] = int(v)  # make sure values are of type int
+            event_id = _ensure_int(event_id, 'event_id')
+            event_id = {str(event_id): event_id}
         self.event_id = event_id
         del event_id
 
@@ -397,6 +394,7 @@ class BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         self._decim = 1
         self._raw_times = self.times
         assert self._data.shape[-1] == len(self.times)
+        self._raw = None  # shouldn't need it anymore
         return self
 
     @verbose
@@ -867,11 +865,12 @@ class BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     @copy_function_doc_to_method_doc(plot_epochs)
     def plot(self, picks=None, scalings=None, n_epochs=20, n_channels=20,
              title=None, events=None, event_colors=None, show=True,
-             block=False):
+             block=False, decim='auto'):
         return plot_epochs(self, picks=picks, scalings=scalings,
                            n_epochs=n_epochs, n_channels=n_channels,
                            title=title, events=events,
-                           event_colors=event_colors, show=show, block=block)
+                           event_colors=event_colors, show=show, block=block,
+                           decim=decim)
 
     @copy_function_doc_to_method_doc(plot_epochs_psd)
     def plot_psd(self, fmin=0, fmax=np.inf, tmin=None, tmax=None, proj=False,
@@ -1000,15 +999,18 @@ class BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                              show=show)
 
     @copy_function_doc_to_method_doc(plot_epochs_image)
-    def plot_image(self, picks=None, sigma=0., vmin=None,
-                   vmax=None, colorbar=True, order=None, show=True,
-                   units=None, scalings=None, cmap='RdBu_r',
-                   fig=None, axes=None, overlay_times=None):
+    def plot_image(self, picks=None, sigma=0., vmin=None, vmax=None,
+                   colorbar=True, order=None, show=True, units=None,
+                   scalings=None, cmap=None, fig=None, axes=None,
+                   overlay_times=None, combine=None, group_by=None,
+                   evoked=True, ts_args=dict(), title=None):
         return plot_epochs_image(self, picks=picks, sigma=sigma, vmin=vmin,
                                  vmax=vmax, colorbar=colorbar, order=order,
                                  show=show, units=units, scalings=scalings,
                                  cmap=cmap, fig=fig, axes=axes,
-                                 overlay_times=overlay_times)
+                                 overlay_times=overlay_times, combine=combine,
+                                 group_by=group_by, evoked=evoked,
+                                 ts_args=ts_args, title=title)
 
     @verbose
     def drop(self, indices, reason='USER', verbose=None):
@@ -1433,58 +1435,6 @@ class BaseEpochs(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         self.times = self.times[tmask]
         self._raw_times = self._raw_times[tmask]
         self._data = self._data[:, :, tmask]
-        return self
-
-    @verbose
-    def resample(self, sfreq, npad='auto', window='boxcar', n_jobs=1,
-                 verbose=None):
-        """Resample data.
-
-        .. note:: Data must be loaded.
-
-        Parameters
-        ----------
-        sfreq : float
-            New sample rate to use
-        npad : int | str
-            Amount to pad the start and end of the data.
-            Can also be "auto" to use a padding that will result in
-            a power-of-two size (can be much faster).
-        window : string or tuple
-            Window to use in resampling. See :func:`scipy.signal.resample`.
-        n_jobs : int
-            Number of jobs to run in parallel.
-        verbose : bool, str, int, or None
-            If not None, override default verbose level (see
-            :func:`mne.verbose` :ref:`Logging documentation <tut_logging>` for
-            more). Defaults to self.verbose.
-
-        Returns
-        -------
-        epochs : instance of Epochs
-            The resampled epochs object.
-
-        See Also
-        --------
-        mne.Epochs.savgol_filter
-        mne.io.Raw.resample
-
-        Notes
-        -----
-        For some data, it may be more accurate to use npad=0 to reduce
-        artifacts. This is dataset dependent -- check your data!
-        """
-        # XXX this could operate on non-preloaded data, too
-        if not self.preload:
-            raise RuntimeError('Can only resample preloaded data')
-        o_sfreq = self.info['sfreq']
-        self._data = resample(self._data, sfreq, o_sfreq, npad, window=window,
-                              n_jobs=n_jobs)
-        # adjust indirectly affected variables
-        self.info['sfreq'] = float(sfreq)
-        self.times = (np.arange(self._data.shape[2], dtype=np.float) /
-                      sfreq + self.times[0])
-        self._raw_times = self.times
         return self
 
     def copy(self):
@@ -1936,7 +1886,7 @@ class EpochsArray(BaseEpochs):
         If None (default), all event values are set to 1 and event time-samples
         are set to range(n_epochs).
     tmin : float
-        Start time before event. If nothing provided, defaults to -0.2.
+        Start time before event. If nothing provided, defaults to 0.
     event_id : int | list of int | dict | None
         The id of the event to consider. If dict,
         the keys can later be used to access associated events. Example:

@@ -15,7 +15,7 @@ from .channels.channels import (ContainsMixin, UpdateChannelsMixin,
                                 SetChannelsMixin, InterpolationMixin,
                                 equalize_channels)
 from .channels.layout import _merge_grad_data, _pair_grad_sensors
-from .filter import resample, detrend, FilterMixin
+from .filter import detrend, FilterMixin
 from .utils import (check_fname, logger, verbose, _time_mask, warn, sizeof_fmt,
                     SizeMixin, copy_function_doc_to_method_doc)
 from .viz import (plot_evoked, plot_evoked_topomap, plot_evoked_field,
@@ -311,9 +311,10 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     @copy_function_doc_to_method_doc(plot_evoked_topo)
     def plot_topo(self, layout=None, layout_scale=0.945, color=None,
                   border='none', ylim=None, scalings=None, title=None,
-                  proj=False, vline=[0.0], fig_facecolor='k',
-                  fig_background=None, axis_facecolor='k', font_color='w',
-                  merge_grads=False, legend=True, axes=None, show=True):
+                  proj=False, vline=[0.0], fig_facecolor=None,
+                  fig_background=None, axis_facecolor=None, font_color=None,
+                  merge_grads=False, legend=True, axes=None,
+                  background_color=None, show=True):
         """
 
         Notes
@@ -327,7 +328,8 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin,
                                 fig_background=fig_background,
                                 axis_facecolor=axis_facecolor,
                                 font_color=font_color, merge_grads=merge_grads,
-                                legend=legend, axes=axes, show=show)
+                                legend=legend, axes=axes,
+                                background_color=background_color, show=show)
 
     @copy_function_doc_to_method_doc(plot_evoked_topomap)
     def plot_topomap(self, times="auto", ch_type=None, layout=None, vmin=None,
@@ -480,38 +482,6 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin,
         """
         from .forward import _as_meg_type_evoked
         return _as_meg_type_evoked(self, ch_type=ch_type, mode=mode)
-
-    def resample(self, sfreq, npad='auto', window='boxcar'):
-        """Resample data.
-
-        This function operates in-place.
-
-        Parameters
-        ----------
-        sfreq : float
-            New sample rate to use
-        npad : int | str
-            Amount to pad the start and end of the data.
-            Can also be "auto" to use a padding that will result in
-            a power-of-two size (can be much faster).
-        window : string or tuple
-            Window to use in resampling. See scipy.signal.resample.
-
-        Returns
-        -------
-        evoked : instance of mne.Evoked
-            The resampled evoked object.
-        """
-        sfreq = float(sfreq)
-        o_sfreq = self.info['sfreq']
-        self.data = resample(self.data, sfreq, o_sfreq, npad, -1, window)
-        # adjust indirectly affected variables
-        self.info['sfreq'] = sfreq
-        self.times = (np.arange(self.data.shape[1], dtype=np.float) / sfreq +
-                      self.times[0])
-        self.first = int(self.times[0] * self.info['sfreq'])
-        self.last = len(self.times) + self.first - 1
-        return self
 
     def detrend(self, order=1, picks=None):
         """Detrend data.

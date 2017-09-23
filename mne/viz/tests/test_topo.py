@@ -78,7 +78,7 @@ def test_plot_topo():
     # Show topography
     evoked = _get_epochs().average()
     # should auto-find layout
-    plot_evoked_topo([evoked, evoked], merge_grads=True)
+    plot_evoked_topo([evoked, evoked], merge_grads=True, background_color='w')
     # Test jointplot
     evoked.plot_joint()
 
@@ -120,8 +120,10 @@ def test_plot_topo():
         _plot_update_evoked_topo_proj(params, bools)
     # should auto-generate layout
     plot_evoked_topo(picked_evoked_eeg.copy(),
-                     fig_background=np.zeros((4, 3, 3)), proj=True)
-    picked_evoked.plot_topo(merge_grads=True)  # Test RMS plot of grad pairs
+                     fig_background=np.zeros((4, 3, 3)), proj=True,
+                     background_color='k')
+    # Test RMS plot of grad pairs
+    picked_evoked.plot_topo(merge_grads=True, background_color='w')
     plt.close('all')
     for ax, idx in iter_topography(evoked.info):
         ax.plot(evoked.data[idx], color='red')
@@ -158,6 +160,7 @@ def test_plot_tfr_topo():
 
     # test opening tfr by clicking
     num_figures_before = len(plt.get_fignums())
+    # could use np.reshape(fig.axes[-1].images[0].get_extent(), (2, 2)).mean(1)
     _fake_click(fig, fig.axes[-1], (0.08, 0.65))
     assert_equal(num_figures_before + 1, len(plt.get_fignums()))
     plt.close('all')

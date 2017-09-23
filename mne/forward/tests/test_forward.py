@@ -4,6 +4,7 @@ import warnings
 import gc
 
 from nose.tools import assert_true, assert_raises
+import pytest
 import numpy as np
 from numpy.testing import (assert_array_almost_equal, assert_equal,
                            assert_array_equal, assert_allclose)
@@ -16,7 +17,7 @@ from mne import (read_forward_solution, apply_forward, apply_forward_raw,
 from mne.tests.common import assert_naming
 from mne.label import read_label
 from mne.utils import (requires_mne, run_subprocess, _TempDir,
-                       run_tests_if_main, slow_test)
+                       run_tests_if_main)
 from mne.forward import (restrict_forward_to_stc, restrict_forward_to_label,
                          Forward)
 
@@ -94,7 +95,7 @@ def test_convert_forward():
     gc.collect()
 
 
-@slow_test
+@pytest.mark.slowtest
 @testing.requires_testing_data
 def test_io_forward():
     """Test IO for forward solutions
@@ -235,6 +236,14 @@ def test_restrict_forward_to_stc():
     assert_equal(fwd_out['src'][0]['vertno'], fwd['src'][0]['vertno'][0:15])
     assert_equal(fwd_out['src'][1]['vertno'], fwd['src'][1]['vertno'][0:5])
 
+    # Test saving the restricted forward object. This only works if all fields
+    # are properly accounted for.
+    temp_dir = _TempDir()
+    fname_copy = op.join(temp_dir, 'copy-fwd.fif')
+    write_forward_solution(fname_copy, fwd_out, overwrite=True)
+    fwd_out_read = read_forward_solution(fname_copy)
+    compare_forwards(fwd_out, fwd_out_read)
+
 
 @testing.requires_testing_data
 def test_restrict_forward_to_label():
@@ -292,6 +301,14 @@ def test_restrict_forward_to_label():
     assert_equal(fwd_out['src'][1]['nuse'], len(src_sel_rh))
     assert_equal(fwd_out['src'][0]['vertno'], vertno_lh)
     assert_equal(fwd_out['src'][1]['vertno'], vertno_rh)
+
+    # Test saving the restricted forward object. This only works if all fields
+    # are properly accounted for.
+    temp_dir = _TempDir()
+    fname_copy = op.join(temp_dir, 'copy-fwd.fif')
+    write_forward_solution(fname_copy, fwd_out, overwrite=True)
+    fwd_out_read = read_forward_solution(fname_copy)
+    compare_forwards(fwd_out, fwd_out_read)
 
 
 @testing.requires_testing_data

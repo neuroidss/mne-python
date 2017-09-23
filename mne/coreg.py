@@ -947,6 +947,7 @@ def scale_bem(subject_to, bem_name, subject_from=None, scale=None,
     for surf in surfs:
         surf['rr'] *= scale
         if nn_scale is not None:
+            assert len(surf['nn']) > 0
             surf['nn'] *= nn_scale
             _normalize_vectors(surf['nn'])
     write_bem_surfaces(dst, surfs)
@@ -1149,7 +1150,7 @@ def scale_source_space(subject_to, src_name, subject_from=None, scale=None,
         spacing = src_name  # spacing in mm
         src_pattern = src_fname
     else:
-        match = re.match("(oct|ico)-?(\d+)$", src_name)
+        match = re.match(r"(oct|ico)-?(\d+)$", src_name)
         if match:
             spacing = '-'.join(match.groups())
             src_pattern = src_fname

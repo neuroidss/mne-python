@@ -13,7 +13,7 @@ import numpy as np
 from numpy.testing import assert_raises, assert_array_equal
 
 from nose.tools import assert_true, assert_equal
-
+import pytest
 
 from mne import read_evokeds, read_proj
 from mne.io import read_raw_fif, read_info
@@ -22,7 +22,7 @@ from mne.io.pick import pick_info, channel_indices_by_type
 from mne.channels import read_layout, make_eeg_layout
 from mne.datasets import testing
 from mne.time_frequency.tfr import AverageTFR
-from mne.utils import slow_test, run_tests_if_main
+from mne.utils import run_tests_if_main
 
 from mne.viz import plot_evoked_topomap, plot_projs_topomap
 from mne.viz.topomap import (_check_outlines, _onselect, plot_topomap,
@@ -49,7 +49,7 @@ event_name = op.join(base_dir, 'test-eve.fif')
 layout = read_layout('Vectorview-all')
 
 
-@slow_test
+@pytest.mark.slowtest
 @testing.requires_testing_data
 def test_plot_topomap():
     """Test topomap plotting."""
@@ -155,7 +155,9 @@ def test_plot_topomap():
                           baseline=(None, 0), proj=False)
     with warnings.catch_warnings(record=True):
         warnings.simplefilter('always')
-        fig1 = evoked.plot_topomap(.1, 'mag', proj='interactive', **fast_test)
+        fig1 = evoked.plot_topomap('interactive', 'mag', proj='interactive',
+                                   **fast_test)
+        _fake_click(fig1, fig1.axes[1], (0.5, 0.5))  # click slider
     data_max = np.max(fig1.axes[0].images[0]._A)
     fig2 = plt.gcf()
     _fake_click(fig2, fig2.axes[0], (0.075, 0.775))  # toggle projector
